@@ -33,6 +33,9 @@ for s in oidc-request-secret-123 runtime-secret-456 ghs-secret-789 step-script-s
   if grep -q "$s" <<< "$out"; then echo "FAIL: sandbox saw $s"; fail=1; fi
 done
 grep -q "PWD-OK infra" <<< "$out" || { echo "FAIL: terraform did not run in the sandbox copy"; fail=1; }
+v=$(/src/scripts/tf_sandbox.sh run infra version 2>&1 | head -n1)
+[ "$v" = "Terraform v0.0.0-fake" ] || { echo "FAIL: sandbox can't resolve terraform ($v)"; fail=1; }
+[ "$(stat -c %U /usr/local/lib/tf-sandbox/terraform)" = root ] || { echo "FAIL: sandbox terraform not root-owned"; fail=1; }
 grep -q "AWSCREDS-OK" <<< "$out" || { echo "FAIL: sandbox lacks the AWS profile"; fail=1; }
 grep -q "REGION eu-west-2" <<< "$out" || { echo "FAIL: AWS_REGION not passed"; fail=1; }
 grep -q "SUDO-DENIED" <<< "$out" || { echo "FAIL: sandbox could sudo"; fail=1; }

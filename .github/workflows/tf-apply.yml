@@ -303,6 +303,7 @@ jobs:
         env:
           TOOLS: ${{ steps.tools.outputs.dir }}
           SANDBOX_EGRESS_HOSTS: ${{ runner.temp }}/egress-hosts.txt
+          SANDBOX_TF_VERSION: ${{ inputs.terraform_version }}
         run: bash "$TOOLS/scripts/tf_sandbox.sh" setup "$GITHUB_WORKSPACE"
 
       - name: terraform init (sandbox)

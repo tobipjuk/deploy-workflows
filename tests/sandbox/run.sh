@@ -10,6 +10,8 @@ docker run --rm --cap-add NET_ADMIN -v "$root:/src:ro" "$image" bash -c '
   apt-get update -qq >/dev/null && apt-get install -y -qq sudo iptables python3 curl ca-certificates >/dev/null
   useradd -m -s /bin/bash runner
   echo "runner ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/runner
-  mkdir -p /opt/tool && cp /src/tests/sandbox/fake-terraform /opt/tool/terraform && chmod 755 /opt/tool/terraform
-  su runner -c "PATH=/opt/tool:\$PATH HOME=/home/runner bash /src/tests/sandbox/inside.sh"
+  # Like setup-terraform on hosted runners: the binary lives under the runner home (closed by setup).
+  install -d -o runner -g runner /home/runner/work /home/runner/work/_temp /home/runner/work/_temp/tf
+  install -o runner -g runner -m 755 /src/tests/sandbox/fake-terraform /home/runner/work/_temp/tf/terraform
+  su runner -c "PATH=/home/runner/work/_temp/tf:\$PATH HOME=/home/runner SANDBOX_TF_VERSION=0.0.0-fake bash /src/tests/sandbox/inside.sh"
 '

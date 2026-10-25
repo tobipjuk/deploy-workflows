@@ -55,3 +55,29 @@ jobs:
           persist-credentials: false
       - name: Hostile terraform can't see runner secrets (container test)
         run: bash tests/sandbox/run.sh
+
+  # On a real GitHub-hosted runner: setup-terraform puts terraform under the runner's home, which
+  # the sandbox closes; the sandbox must still resolve the pinned terraform (ICE run 40190680299).
+  sandbox-hosted:
+    name: Terraform sandbox on a hosted runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.17.0"
+          terraform_wrapper: false
+      - name: Sandbox setup + terraform version as the sandbox user
+        env:
+          SANDBOX_TF_VERSION: "1.17.0"
+        run: |
+          set -euo pipefail
+          printf 'sts.us-east-1.amazonaws.com\n' > "$RUNNER_TEMP/egress-hosts.txt"
+          SANDBOX_EGRESS_HOSTS="$RUNNER_TEMP/egress-hosts.txt" bash scripts/tf_sandbox.sh setup "$GITHUB_WORKSPACE"
+          v=$(bash scripts/tf_sandbox.sh run . version | head -n1)
+          [ "$v" = "Terraform v1.17.0" ] || { echo "::error::sandbox terraform: $v"; exit 1; }
+          bash scripts/tf_sandbox.sh run modules/github-oidc-roles init -backend=false -input=false -no-color | tail -n1
+          bash scripts/tf_sandbox.sh egress-report

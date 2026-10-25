@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Plays a hostile Terraform config: look for the runner's secrets everywhere it can.
+[ "${1:-}" = version ] && { echo "Terraform v0.0.0-fake"; exit 0; }
 [ "${1:-}" = probe ] || { echo "plan bytes" > tfplan; exit 0; }
 echo "PWD-OK $(basename "$PWD")"
 echo "REGION ${AWS_REGION:-none}"

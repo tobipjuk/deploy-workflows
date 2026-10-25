@@ -16,7 +16,9 @@
 #                       followed) and chown it to the runner user; callers must treat it as
 #                       untrusted (bundle.py skips links and non-regular files)
 #
-# Env passed into the sandbox: HOME, PATH (terraform's dir + system dirs), LANG, TF_IN_AUTOMATION,
+# Terraform is the root-owned copy $SANDBOX_TF (installed by setup from the job's setup-terraform
+# binary, sha256-compared, version-checked as the sandbox user; SANDBOX_TF_VERSION pins it).
+# Env passed into the sandbox: HOME, PATH (/usr/local/lib/tf-sandbox:/usr/bin:/bin), LANG, TF_IN_AUTOMATION,
 # TF_INPUT, CHECKPOINT_DISABLE, HTTPS_PROXY/HTTP_PROXY (the egress proxy),
 # AWS_REGION/AWS_DEFAULT_REGION (if set) and nothing else.
 #
@@ -31,6 +33,9 @@ set -euo pipefail
 SANDBOX_USER=${SANDBOX_USER:-tfsandbox}
 SANDBOX_HOME=/home/$SANDBOX_USER
 SANDBOX_PROXY_PORT=${SANDBOX_PROXY_PORT:-3128}
+# Terraform for the sandbox: a root-owned, world-executable copy outside the runner's (0700) home.
+SANDBOX_TF_DIR=/usr/local/lib/tf-sandbox
+SANDBOX_TF=$SANDBOX_TF_DIR/terraform
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 STATS=${RUNNER_TEMP:-/tmp}/tf-sandbox-egress.json
 
@@ -48,6 +53,13 @@ case "$cmd" in
       case "$g" in sudo|admin|adm|docker|wheel|lxd|root) die "sandbox user is in group $g" ;; esac
     done
     if sudo -l -U "$SANDBOX_USER" 2>/dev/null | grep -q '(ALL'; then die "sandbox user has sudo rights"; fi
+    # Install the job's terraform (setup-terraform unpacks it under the runner's home, which the
+    # sandbox can't enter) as a root-owned copy, verified byte-for-byte and by its version.
+    src_tf=$(command -v terraform) || die "terraform not on PATH (run setup-terraform first)"
+    src_tf=$(readlink -f "$src_tf")
+    sudo install -d -o root -g root -m 0755 "$SANDBOX_TF_DIR"
+    sudo install -o root -g root -m 0755 "$src_tf" "$SANDBOX_TF"
+    [ "$(sha256sum < "$src_tf")" = "$(sha256sum < "$SANDBOX_TF")" ] || die "terraform copy differs from the installed binary"
     # The runner's home holds the step scripts, runner files and its AWS profile.
     sudo chmod 0700 "$HOME"
     sudo rm -rf "$SANDBOX_HOME/src" "$SANDBOX_HOME/.aws"
@@ -85,6 +97,14 @@ case "$cmd" in
       sudo iptables -I OUTPUT 1 -m owner --uid-owner "$uid" -o lo -p tcp -d 127.0.0.1 \
         --dport "$SANDBOX_PROXY_PORT" -j ACCEPT
     fi
+    # The sandbox user must be able to run it (and it must be the pinned version, if given).
+    ver=$(sudo -n -u "$SANDBOX_USER" -H -- env -i HOME="$SANDBOX_HOME" PATH="$SANDBOX_TF_DIR:/usr/bin:/bin" \
+      "$SANDBOX_TF" version 2>&1 | head -n1) || die "the sandbox user can't run terraform: $ver"
+    case "$ver" in "Terraform v"*) ;; *) die "the sandbox user can't run terraform: $ver" ;; esac
+    if [ -n "${SANDBOX_TF_VERSION:-}" ] && [ "$ver" != "Terraform v$SANDBOX_TF_VERSION" ]; then
+      die "sandbox terraform is '$ver', expected v$SANDBOX_TF_VERSION"
+    fi
+    echo "sandbox terraform: $ver ($SANDBOX_TF)"
     ;;
   egress-report)
     if [ -f "$STATS" ]; then
@@ -97,16 +117,15 @@ case "$cmd" in
     tfdir=${2:?usage: tf_sandbox.sh run TF_DIR ARGS...}
     shift 2
     case "$tfdir" in /*|*..*) die "TF_DIR must be relative" ;; esac
-    tf=$(command -v terraform) || die "terraform not on PATH"
-    tfbin=$(dirname "$(readlink -f "$tf")")
-    envs=(HOME="$SANDBOX_HOME" PATH="$tfbin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8
+    [ -x "$SANDBOX_TF" ] || die "no sandbox terraform at $SANDBOX_TF (run setup first)"
+    envs=(HOME="$SANDBOX_HOME" PATH="$SANDBOX_TF_DIR:/usr/bin:/bin" LANG=C.UTF-8
           TF_IN_AUTOMATION=1 TF_INPUT=0 CHECKPOINT_DISABLE=1
           HTTPS_PROXY="http://127.0.0.1:$SANDBOX_PROXY_PORT" HTTP_PROXY="http://127.0.0.1:$SANDBOX_PROXY_PORT"
           https_proxy="http://127.0.0.1:$SANDBOX_PROXY_PORT" http_proxy="http://127.0.0.1:$SANDBOX_PROXY_PORT")
     [ -z "${AWS_REGION:-}" ] || envs+=(AWS_REGION="$AWS_REGION" AWS_DEFAULT_REGION="$AWS_REGION")
     # shellcheck disable=SC2016  # $1/$@ expand inside the sandbox shell
     sudo -n -u "$SANDBOX_USER" -H -- env -i "${envs[@]}" \
-      bash --noprofile --norc -c 'cd "$1" && shift && exec terraform "$@"' _ "$SANDBOX_HOME/src/$tfdir" "$@"
+      bash --noprofile --norc -c 'cd "$1" && shift && exec "$0" "$@"' "$SANDBOX_TF" "$SANDBOX_HOME/src/$tfdir" "$@"
     ;;
   export)
     dest=${2:?usage: tf_sandbox.sh export DEST}
