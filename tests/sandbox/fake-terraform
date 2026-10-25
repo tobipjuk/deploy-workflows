@@ -11,5 +11,11 @@ find /home/runner -maxdepth 1 2>&1 | head -3
 grep -q AKIAEXAMPLE "$HOME/.aws/credentials" && echo AWSCREDS-OK
 cat "$HOME/src/.git/config" 2>&1
 sudo -n true 2>/dev/null && echo SUDO-ALLOWED || echo SUDO-DENIED
+# Egress: direct, DNS, via proxy to a foreign host, via proxy to AWS
+curl -s -o /dev/null --noproxy '*' --max-time 5 https://example.com && echo EGRESS-DIRECT-OK || echo EGRESS-DIRECT-BLOCKED
+getent hosts example.com >/dev/null && echo DNS-OK || echo DNS-BLOCKED
+curl -s -o /dev/null --max-time 10 https://example.com && echo PROXY-FOREIGN-OK || echo PROXY-FOREIGN-BLOCKED
+curl -sf -o /dev/null --max-time 10 http://169.254.169.254/latest/meta-data/ && echo PROXY-IMDS-OK || echo PROXY-IMDS-BLOCKED
+curl -s -o /dev/null -w "%{http_code}" --max-time 15 https://sts.amazonaws.com/ | grep -qE '^[1-5][0-9][0-9]$' && echo PROXY-AWS-OK || echo PROXY-AWS-FAILED
 echo "plan bytes" > tfplan
 ln -s /home/runner/.aws/credentials evil-link

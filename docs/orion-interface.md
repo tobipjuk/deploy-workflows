@@ -129,6 +129,7 @@ sha256 = 3b67c029e1b57856cef4f4db0542dd374b4548e25f944a35389a94546f2d384e
 | `changes_digest` | sha256 of the canonical `changes` |
 | `diff` | Up to 40 updated/replaced resources × 8 attributes: `{address, attrs: [{path, before, after}]}`; values ≤ 60 chars, sensitive or secret-named attributes are `(hidden)`, unknown ones `(known after apply)` |
 | `diff_truncated` | Boolean |
+| `attention`, `attention_truncated` | Up to 30 changes that redirect traffic or grant access: `{address, label, action, path, before, after}` (labels: API integration target, CloudFront origin, Lambda invoke permission, Lambda function URL auth, role trust policy, IAM policy document, managed policy attached, DNS record, SNS subscription, Lambda environment variable, S3 bucket configuration). Values are ≤ 100 chars; sensitive ones are `(hidden)`, policies/env `(changed, value not shown)`; `path`/`before`/`after` are null for bucket-config resources. **Show these first** in the message, under "NEEDS ATTENTION", before the change list. Optional field: absent in plans made before deploy-workflows adds it |
 | `bundle_sha256`, `bundle_artifact` | Hash and artifact name (`plan-bundle`) of the bundle |
 
 ## 4a. Plan attestation (Guardian F1)
@@ -212,6 +213,10 @@ Commit 1a2b3c4 "App: Sky AR (beta) ..."   [commit subject is untrusted text]
 Plan run 18234567890, 10:42 UTC, expires 12:42 UTC
 +2 add  ~5 change  -0 destroy  ±0 replace
 Destructive: no
+
+NEEDS ATTENTION (1):
+! CloudFront origin (change) module.app.aws_cloudfront_distribution.this
+    origin[0].domain_name: "shc-app.s3.eu-west-2.amazonaws.com" -> "attacker.example.net"
 
 Changes (7):
 + module.app.aws_s3_object.site["assets/js/ar.js"]

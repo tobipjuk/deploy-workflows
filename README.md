@@ -32,7 +32,9 @@ Orion (server) polls plan runs ◄───────────────�
 | `scripts/bundle.py` | Creates and verifies the plan bundle |
 | `.github/workflows/tf-attest.yml` | Nested in tf-plan.yml: attests the plan artifacts (no project code) |
 | `scripts/attest.py` | Plan attestation: manifest + audience, RS256/JWKS verification of the tf-attest OIDC token |
-| `scripts/tf_sandbox.sh` | Runs Terraform as an unprivileged user with a scrubbed environment |
+| `scripts/tf_sandbox.sh` | Runs Terraform as an unprivileged user with a scrubbed environment and egress firewall |
+| `scripts/egress_proxy.py` | The sandbox's only way out: CONNECT proxy for AWS + Terraform registry hosts |
+| `scripts/check_tf_config.py` | Static pre-plan gate on provider/backend/terraform blocks and module sources |
 | `scripts/check_plan_run.py` | Is this plan run deployable (main, newest, < 2 h, made by tf-plan.yml)? |
 | `scripts/check_lockfile.py` | Provider allowlist, checked before `terraform init` |
 | `policy/allowed-providers.txt` | Providers a deploy may use |
@@ -92,6 +94,9 @@ tf-plan (with the plan role):
 
 - override files, `*.auto.tfvars`, CLI config files in the repo → refused;
 - lock file providers outside the allowlist → refused **before** `init`, so the provider never runs;
+- provider/backend/terraform settings outside the CI allowlist (endpoints, proxies, CA bundles,
+  shared config files, assume_role, skip_* ...) and non-local modules → refused before `init`;
+- Terraform runs sandboxed: own uid, `env -i`, egress only through the allowlisting proxy;
 - plan JSON: provisioners, `external` data sources, providers outside the allowlist → blocked;
 - deletes, replacements, unknown or missing actions, `action_invocations`, `deferred_changes`,
   incomplete plans → refused unless `plan.yml` was dispatched with `allow_destroy`;
@@ -140,6 +145,7 @@ Guardian's review of the first template (starhuntercrew `20d162e`) and how each 
 | 9 | Bundle uploaded without a deploy role | Bundle (and its sha) produced only when `deploy_enabled` |
 | 10 | Unknown plan constructs | `action_invocations`, `deferred_changes`, incomplete plans and missing/null actions count as destructive |
 | F1 | A box-added job in the same `plan.yml` run (`needs: plan`, `actions: write`) can download `plan-bundle`, keep the genuine tfplan, swap a Lambda zip, re-tar with the right `SOURCE`, and re-upload `plan-bundle` + `plan-summary` with a matching `bundle_sha256` and any diff text; the changes digest (addresses + actions only) doesn't notice, Orion and tf-apply pass, AWS gets the malicious zip | **Plan attestation**: a nested job from a separate file, `tf-attest.yml` (called only by tf-plan.yml, runs no project code), mints a GitHub OIDC token with `aud = deploy-workflows-plan:v2:<sha256(manifest)>`, the manifest holding the sha256 of the bundle and of the whole `plan-summary.json` (diff included). Only that job carries `job_workflow_ref = tf-attest.yml@refs/heads/main`; a box-added job's token carries the project's own workflow ref, and the plan job's carries `tf-plan.yml` (it runs project Terraform, so it must not be able to attest even if Terraform escaped). tf-apply verifies signature (GitHub JWKS), `iss`, `job_workflow_ref`, `repository`, `run_id`, `run_attempt`, `sha`, `ref`, `iat` inside the run, then recomputes both hashes from the downloaded artifacts (`scripts/attest.py`). A box-written `plan.yml` calling `tf-attest.yml` directly is refused because the run must consist of exactly tf-plan's two jobs, both successful, referencing both files. Defenc| F1b | (Guardian on f63cf2e, HIGH) The attestation token was minted in the job that runs project Terraform; with `id-token: write` every step there holds the OIDC request credentials, so Terraform reading `/proc/self/environ` (HCL `file()`) could mint tokens for any audience | (a) separate attest job (nested `tf-attest.yml`, no project code); (b) the token must carry `job_workflow_ref = tf-attest.yml@refs/heads/main`. Environments can't serve as the distinguishing claim: GitHub Free can't use environments in private repos; (c) Terraform runs as user `tfsandbox` (no sudo, no docker) with `env -i` (HOME, PATH, LANG, TF_*, AWS_REGION only), a copy of the checkout without `.git`, and a copy of the AWS profile; the runner's home is closed (0700) (`scripts/tf_sandbox.sh`, tested in a container by `tests/sandbox/run.sh`). Same in tf-apply. JWKS fetch refuses redirects; `kid` must be a non-empty string |
+| M2 | (Guardian, ICE review) The plan role runs on every push without approval and can read secrets (state, Lambda env). The allowlisted aws provider/S3 backend accept `endpoints {}`, proxies, `custom_ca_bundle`, `shared_config_files` (`credential_process`), `assume_role`, `skip_*` ...: an aliased provider whose endpoint URL carries a secret leaks it during plan | (1) **static pre-plan gate** `scripts/check_tf_config.py` (tf-plan and tf-apply, before init): allowlists, not denylists, for provider blocks (aws: alias, region, profile, allowed/forbidden_account_ids, max_retries, retry_mode, default_tags.tags, ignore_tags; archive/random: alias), `terraform {}` (required_version, required_providers, backend), backends (s3 basics, local path), profile = the pipeline's profile or `var.x`, module sources local only; root and every local module, HCL and JSON syntax, unparseable = refused. Terraform can't set env vars and runs under `env -i`. (2) **egress allowlist**: the sandbox uid may only reach a local CONNECT proxy (iptables/ip6tables owner match, no DNS, no IMDS); the proxy relays :443 to `*.amazonaws.com`, `registry.terraform.io`, `releases.hashicorp.com` only, refuses non-global addresses, logs counts not names. (3) **needs-attention list** in the summary and `plan-summary.json`: API integration targets, CloudFront origins, Lambda permissions and function URL auth, trust/IAM policies, DNS records, SNS subscriptions, Lambda env changes, S3 bucket-config resources, shown first in Telegram; digest binding unchanged |
 e in depth: the plan run must have exactly those two jobs (all attempts) and every referenced workflow must be deploy-workflows `@refs/heads/main`. Orion performs the same verification before showing a plan (second layer: what Tobi sees is attested too). Artifact attestations (Enterprise for private repos) and job outputs (not readable via the REST jobs API) weren't usable |
 
 Further hardening in this version: plan attestation (F1), changes digest binding (what Tobi saw = what is applied),
@@ -181,6 +187,12 @@ provider allowlist before `init`, provisioner/external-program refusal, plan run
 - **Never widen the plan role's reads to secrets.** Don't add `ssm:Get*` (or other secret reads)
   to `read_actions` while `plan_deny_kms_decrypt = false`: with Decrypt allowed, that would let
   every box-written plan read SecureStrings.
+- **Requests to AWS itself remain a channel.** The egress allowlist admits any `*.amazonaws.com`
+  host, and a data source can name an attacker-owned resource (another account's bucket,
+  function, parameter) with a secret in the name or a parameter; the call is denied by IAM but
+  may still be logged on the owner's side. Narrowing hosts per project (state bucket, regions,
+  services) or an RCP/SCP on `aws:ResourceAccount` would shrink it; secrets out of state and env
+  (README "Secrets") removes what there is to leak.
 - **GitHub itself** (Actions, OIDC issuer, artifact storage) is trusted.
 - **ReadOnlyAccess on both roles**, capped by the boundary: control-plane reads of the
   project's services in the account (other projects' resource *metadata* in a shared account
@@ -278,7 +290,8 @@ Not built yet; the module's trust and guardrails apply unchanged (boundary state
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
-tests/sandbox/run.sh          # needs docker: Terraform sandbox separation
+tests/sandbox/run.sh          # needs docker: Terraform sandbox separation + egress firewall
+TF_BIN=$(which terraform) tests/sandbox/real-terraform.sh   # optional: real init/plan via the proxy
 actionlint .github/workflows/*.yml
 terraform fmt -check -recursive modules
 (cd modules/github-oidc-roles && terraform init -backend=false && terraform validate && terraform test)

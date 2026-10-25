@@ -211,6 +211,66 @@ class PlanReportTest(unittest.TestCase):
         self.assertEqual(doc["commit_subject"], "App: x = y")
         self.assertEqual(doc["schema"], 1)
 
+    # --- needs attention (Guardian M2) ---------------------------------------------------------
+    def tc(self, rtype, name, *actions, **kw):
+        r = rc(f"{rtype}.{name}", *actions, **kw)
+        r["type"] = rtype
+        return r
+
+    def test_attention_flags_risky_changes(self):
+        p = plan(
+            self.tc("aws_apigatewayv2_integration", "api", "update",
+                    before={"integration_uri": "arn:aws:lambda:eu-west-2:1:function:shc-api"},
+                    after={"integration_uri": "https://evil.example/collect"}),
+            self.tc("aws_cloudfront_distribution", "site", "update",
+                    before={"origin": [{"domain_name": "shc-site.s3.amazonaws.com", "origin_id": "s3"}]},
+                    after={"origin": [{"domain_name": "attacker.example.net", "origin_id": "s3"}]}),
+            self.tc("aws_lambda_permission", "public", "create", before={},
+                    after={"principal": "*", "action": "lambda:InvokeFunction"}),
+            self.tc("aws_s3_bucket_policy", "backups", "create", before={}, after={"policy": "{}"}),
+            self.tc("aws_iam_role", "lambda", "update", before={"assume_role_policy": "a", "name": "r"},
+                    after={"assume_role_policy": "b", "name": "r"}),
+            self.tc("aws_lambda_function", "api", "update",
+                    before={"environment": [{"variables": {"TOKEN": SECRET}}], "memory_size": 128},
+                    after={"environment": [{"variables": {"TOKEN": SECRET + "x"}}], "memory_size": 128}),
+            self.tc("aws_s3_object", "site", "update", before={"etag": "a"}, after={"etag": "b"}),
+        )
+        code, summary, o, log, doc = self.run_main(p)
+        self.assertEqual(code, 0)
+        by = {(a["address"], a["path"]): a for a in doc["attention"]}
+        self.assertEqual(by[("aws_apigatewayv2_integration.api", "integration_uri")]["after"],
+                         "https://evil.example/collect")
+        self.assertEqual(by[("aws_cloudfront_distribution.site", "origin[0].domain_name")]["after"],
+                         "attacker.example.net")
+        self.assertEqual(by[("aws_lambda_permission.public", "principal")]["after"], "*")
+        self.assertIn(("aws_s3_bucket_policy.backups", None), by)
+        self.assertEqual(by[("aws_iam_role.lambda", "assume_role_policy")]["after"], "(changed, value not shown)")
+        env = by[("aws_lambda_function.api", "environment[0].variables.TOKEN")]
+        self.assertEqual(env["after"], "(changed, value not shown)")
+        self.assertFalse(any(a["address"] == "aws_s3_object.site" for a in doc["attention"]))
+        self.assertEqual(o["attention"], str(len(doc["attention"])))
+        self.assertIn("Needs attention", summary)
+        self.assertIn("attacker.example.net", summary)
+        self.assertNotIn(SECRET, json.dumps(doc) + summary + log)
+
+    def test_attention_respects_sensitivity_and_does_not_change_digest(self):
+        base = [self.tc("aws_s3_object", "o", "update", before={"etag": "a"}, after={"etag": "b"})]
+        risky = self.tc("aws_apigatewayv2_integration", "api", "update",
+                        before={"integration_uri": "x"}, after={"integration_uri": "y"},
+                        bs={"integration_uri": True}, as_={"integration_uri": True})
+        _, _, o1, _, d1 = self.run_main(plan(*base, self.tc("aws_apigatewayv2_integration", "api", "update",
+                                                             before={"integration_uri": "x"}, after={"integration_uri": "z"})))
+        _, _, o2, _, d2 = self.run_main(plan(*base, risky))
+        self.assertEqual(o1["digest"], o2["digest"])  # digest binds addresses + actions only
+        self.assertEqual(d2["attention"][0]["after"], "(hidden)")
+
+    def test_attention_unchanged_paths_not_flagged(self):
+        p = plan(self.tc("aws_cloudfront_distribution", "d", "update",
+                         before={"origin": [{"domain_name": "same"}], "comment": "a"},
+                         after={"origin": [{"domain_name": "same"}], "comment": "b"}))
+        _, _, _, _, doc = self.run_main(p)
+        self.assertEqual(doc["attention"], [])
+
     def test_bad_input(self):
         with tempfile.TemporaryDirectory() as d:
             pj = os.path.join(d, "plan.json")

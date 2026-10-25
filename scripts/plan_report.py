@@ -154,6 +154,105 @@ def attr_diff(change):
     return out
 
 
+# --- needs-attention changes (Guardian M2) -----------------------------------------------------
+# Changes that redirect traffic, grant access or open data, shown first in the job summary and in
+# Telegram so they can't hide in a long list of S3 objects. They don't change the gates; the
+# summary (and so this list) is bound by the attestation, the addresses by the changes digest.
+
+MAX_ATTENTION = 30
+MAX_ATTENTION_VALUE = 100
+BUCKET_CONFIG = re.compile(r"^aws_s3_bucket_(policy|acl|public_access_block|ownership_controls|cors_configuration"
+                           r"|website_configuration|replication_configuration|notification|logging"
+                           r"|server_side_encryption_configuration|versioning|lifecycle_configuration)$")
+# (resource type, attribute path, label, show the value?)
+ATTENTION_RULES = [
+    (re.compile(r"^aws_apigatewayv2_integration$"), re.compile(r"^integration_uri$"), "API integration target", True),
+    (re.compile(r"^aws_api_gateway_integration$"), re.compile(r"^uri$"), "API integration target", True),
+    (re.compile(r"^aws_cloudfront_distribution$"), re.compile(r"^origin\[\d+\]\.domain_name$"), "CloudFront origin", True),
+    (re.compile(r"^aws_lambda_permission$"),
+     re.compile(r"^(principal|source_arn|source_account|principal_org_id|function_url_auth_type)$"),
+     "Lambda invoke permission", True),
+    (re.compile(r"^aws_lambda_function_url$"), re.compile(r"^authorization_type$"), "Lambda function URL auth", True),
+    (re.compile(r"^aws_iam_role$"), re.compile(r"^assume_role_policy$"), "role trust policy", False),
+    (re.compile(r"^aws_iam_(role_policy|policy)$"), re.compile(r"^policy$"), "IAM policy document", False),
+    (re.compile(r"^aws_iam_role_policy_attachment$"), re.compile(r"^policy_arn$"), "managed policy attached", True),
+    (re.compile(r"^aws_route53_record$"), re.compile(r"^(name|type|records\[\d+\]|alias\[0\]\.name)$"), "DNS record", True),
+    (re.compile(r"^aws_sns_topic_subscription$"), re.compile(r"^(endpoint|protocol)$"), "SNS subscription", True),
+    (re.compile(r"^aws_lambda_function$"), re.compile(r"^environment\[0\]\.variables\..+$"),
+     "Lambda environment variable", False),
+]
+
+
+def _flat(v, sens, unk, prefix, out):
+    if sens is True:
+        out[prefix] = "(hidden)"
+        return
+    if unk is True:
+        out[prefix] = "(known after apply)"
+        return
+    if isinstance(v, dict):
+        for k in v:
+            _flat(v[k], _mask_at(sens, k), _mask_at(unk, k), f"{prefix}.{k}" if prefix else str(k), out)
+    elif isinstance(v, list):
+        for i, x in enumerate(v):
+            _flat(x, _mask_at(sens, i), _mask_at(unk, i), f"{prefix}[{i}]", out)
+    else:
+        out[prefix] = v
+
+
+def flatten(change, side):
+    out = {}
+    try:
+        if side == "after":
+            _flat(change.get("after"), change.get("after_sensitive") or False, change.get("after_unknown") or False, "", out)
+        else:
+            _flat(change.get("before"), change.get("before_sensitive") or False, False, "", out)
+    except RecursionError:
+        return {}
+    return out
+
+
+def _att_value(path, v, show):
+    if v is None:
+        return None
+    if v in ("(hidden)", "(known after apply)"):
+        return v
+    # Curated paths (domains, principals, URIs) are shown unless Terraform marks them sensitive;
+    # policy documents and env vars are never shown here.
+    if not show:
+        return "(changed, value not shown)"
+    s = v if isinstance(v, str) else json.dumps(v)
+    return s if len(s) <= MAX_ATTENTION_VALUE else s[: MAX_ATTENTION_VALUE - 1] + "…"
+
+
+def attention(rc, kind):
+    rtype = str(rc.get("type") or "")
+    addr = str(rc.get("address", "?"))
+    change = rc.get("change") if isinstance(rc.get("change"), dict) else {}
+    hits = []
+    if BUCKET_CONFIG.match(rtype):
+        hits.append({"address": addr, "label": "S3 bucket configuration", "action": kind, "path": None,
+                     "before": None, "after": None})
+        return hits
+    rules = [(pr, label, show) for tr, pr, label, show in ATTENTION_RULES if tr.match(rtype)]
+    if not rules:
+        return hits
+    before = flatten(change, "before") if kind != "add" else {}
+    after = flatten(change, "after") if kind != "destroy" else {}
+    # Change detection on the raw values (masked ones would compare "(hidden)" == "(hidden)").
+    raw_b = flatten({"before": change.get("before")}, "before") if kind != "add" else {}
+    raw_a = flatten({"after": change.get("after")}, "after") if kind != "destroy" else {}
+    for path in sorted(set(before) | set(after)):
+        for pr, label, show in rules:
+            if pr.match(path) and (kind in ("add", "destroy") or raw_b.get(path) != raw_a.get(path)
+                                   or after.get(path) == "(known after apply)"):
+                hits.append({"address": addr, "label": label, "action": kind, "path": path,
+                             "before": _att_value(path, before.get(path), show),
+                             "after": _att_value(path, after.get(path), show)})
+                break
+    return hits
+
+
 # --- configuration scan: provisioners, external data sources, providers -----------------
 
 def _walk_modules(module, prefix=""):
@@ -201,7 +300,7 @@ def analyse(plan, allowed_providers=None):
     if plan.get("errored"):
         raise ValueError("the plan errored")
     groups = {k: [] for k in ("add", "change", "destroy", "replace", "forget", "other")}
-    changes, diffs = [], []
+    changes, diffs, attn = [], [], []
     for rc in plan.get("resource_changes") or []:
         change = rc.get("change") if isinstance(rc.get("change"), dict) else {}
         actions = change.get("actions")
@@ -212,6 +311,7 @@ def analyse(plan, allowed_providers=None):
         groups[kind].append(addr)
         changes.append({"address": addr,
                         "actions": [str(a) for a in actions] if isinstance(actions, list) else []})
+        attn.extend(attention(rc, kind))
         if kind in ("change", "replace"):
             d = attr_diff(change)
             if d:
@@ -220,6 +320,7 @@ def analyse(plan, allowed_providers=None):
         v.sort()
     changes.sort(key=lambda c: (c["address"], c["actions"]))
     diffs.sort(key=lambda d: d["address"])
+    attn.sort(key=lambda a: (a["address"], a["path"] or ""))
 
     flags = []
     action_invocations = plan.get("action_invocations") or []
@@ -239,6 +340,7 @@ def analyse(plan, allowed_providers=None):
         "changes": changes,
         "digest": digest(changes),
         "diffs": diffs,
+        "attention": attn,
         "has_changes": bool(changes or action_invocations or deferred),
         "destructive": destructive,
         "flags": flags,
@@ -280,6 +382,8 @@ def summary_json(result, meta):
         "changes_digest": result["digest"],
         "diff": diff,
         "diff_truncated": truncated,
+        "attention": result["attention"][:MAX_ATTENTION],
+        "attention_truncated": len(result["attention"]) > MAX_ATTENTION,
     }
     return doc
 
@@ -306,6 +410,12 @@ def markdown(result):
     if not result["has_changes"]:
         out += ["No changes. Nothing to deploy.", ""]
         return "\n".join(out) + "\n"
+    if result["attention"]:
+        out += [f"**Needs attention ({len(result['attention'])}):**", ""]
+        for a in result["attention"][:MAX_ATTENTION]:
+            detail = f" `{a['path']}`: {a['before']} → {a['after']}" if a["path"] else ""
+            out.append(f"- {a['label']} ({a['action']}) `{a['address']}`{detail}")
+        out.append("")
     labels = [("replace", "Replace (destroy + create)"), ("destroy", "Destroy"), ("other", "Other"),
               ("add", "Add"), ("change", "Change"), ("forget", "Forget")]
     shown, total = 0, sum(len(v) for v in g.values())
@@ -382,6 +492,7 @@ def main(argv=None):
             f.write(f"destructive={str(result['destructive']).lower()}\n")
             f.write(f"blocked={str(bool(result['blocked'])).lower()}\n")
             f.write(f"digest={result['digest']}\n")
+            f.write(f"attention={len(result['attention'])}\n")
             for k in ("add", "change", "destroy", "replace"):
                 f.write(f"{k}={c[k]}\n")
     if args.json_out:

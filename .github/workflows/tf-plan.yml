@@ -103,6 +103,7 @@ jobs:
         env:
           ACCOUNT_ID: ${{ inputs.aws_account_id }}
           ROLE_ARN: ${{ inputs.plan_role_arn }}
+          PROFILE: ${{ inputs.aws_profile || 'default' }}
           TOOLS: ${{ steps.tools.outputs.dir }}
         run: |
           set -euo pipefail
@@ -121,6 +122,11 @@ jobs:
           $ok
           # Providers run code with the role's credentials: allowlist checked before init.
           python3 -I "$TOOLS/scripts/check_lockfile.py" "$TF_DIR/.terraform.lock.hcl" "$TOOLS/policy/allowed-providers.txt"
+          # Guardian M2: no provider/backend settings that send requests (and secrets) elsewhere
+          # (endpoints, proxies, CA bundles, shared config files, assume_role, skip_* ...), no
+          # remote modules. Static, before init.
+          python3 -I "$TOOLS/scripts/check_tf_config.py" --root "$GITHUB_WORKSPACE" --tf-dir "$TF_DIR" \
+            --profile "$PROFILE"
 
       - name: Show the OIDC subject
         run: |
@@ -216,6 +222,12 @@ jobs:
             echo "</details>"
             echo
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sandbox egress
+        if: always()
+        env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
+        run: bash "$TOOLS/scripts/tf_sandbox.sh" egress-report
 
       - name: Gates (destroy, code execution, providers)
         if: steps.report.outputs.has_changes == 'true'

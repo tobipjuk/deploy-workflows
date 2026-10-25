@@ -24,6 +24,13 @@ grep -q "PWD-OK infra" <<< "$out" || { echo "FAIL: terraform did not run in the 
 grep -q "AWSCREDS-OK" <<< "$out" || { echo "FAIL: sandbox lacks the AWS profile"; fail=1; }
 grep -q "REGION eu-west-2" <<< "$out" || { echo "FAIL: AWS_REGION not passed"; fail=1; }
 grep -q "SUDO-DENIED" <<< "$out" || { echo "FAIL: sandbox could sudo"; fail=1; }
+for want in EGRESS-DIRECT-BLOCKED DNS-BLOCKED PROXY-FOREIGN-BLOCKED PROXY-IMDS-BLOCKED; do
+  grep -q "$want" <<< "$out" || { echo "FAIL: expected $want"; fail=1; }
+done
+if [ "${SANDBOX_TEST_OFFLINE:-}" != 1 ]; then
+  grep -q "PROXY-AWS-OK" <<< "$out" || { echo "FAIL: AWS endpoint not reachable through the proxy"; fail=1; }
+fi
+/src/scripts/tf_sandbox.sh egress-report
 # export keeps links as links
 /src/scripts/tf_sandbox.sh export "$HOME/work/out"
 [ -L "$HOME/work/out/infra/evil-link" ] || { echo "FAIL: symlink not preserved as link"; fail=1; }
