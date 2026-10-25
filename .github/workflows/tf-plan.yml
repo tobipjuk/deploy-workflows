@@ -18,8 +18,10 @@
 #   artifact plan-bundle   tfplan + build files + SOURCE + SHA256SUMS, 1 day. Uploaded ONLY when
 #                          the project has a deploy role (deploy_enabled), because a saved plan
 #                          can hold sensitive values.
-#   artifact plan-attestation  manifest.json + token.jwt: a GitHub OIDC token minted in this job
-#                          whose aud commits to the bundle's and the summary's sha256 (with the bundle).
+#   artifact plan-attestation  manifest.json + token.jwt, from the nested tf-attest.yml job: a GitHub
+#                          OIDC token whose aud commits to the bundle's and the summary's sha256.
+# Jobs of a run: exactly "terraform plan" and "attest / attest plan artifacts" (tf-apply and Orion
+# refuse any other shape). Project Terraform runs sandboxed (scripts/tf_sandbox.sh).
 name: tf-plan (reusable)
 
 on:
@@ -86,6 +88,7 @@ jobs:
       has_changes: ${{ steps.report.outputs.has_changes }}
       changes_digest: ${{ steps.report.outputs.digest }}
       bundle_sha256: ${{ steps.bundle.outputs.sha256 }}
+      summary_sha256: ${{ steps.bundle.outputs.summary_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -136,7 +139,8 @@ jobs:
           role-session-name: gh-plan-${{ github.run_id }}
           role-duration-seconds: 3600
           aws-region: ${{ inputs.aws_region }}
-          aws-profile: ${{ inputs.aws_profile }}
+          # Written to ~/.aws (not env): the Terraform sandbox gets a copy of this profile only.
+          aws-profile: ${{ inputs.aws_profile || 'default' }}
           allowed-account-ids: ${{ inputs.aws_account_id }}
 
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
@@ -144,37 +148,48 @@ jobs:
           terraform_version: ${{ inputs.terraform_version }}
           terraform_wrapper: false
 
-      - name: terraform init
-        working-directory: ${{ inputs.tf_dir }}
+      # Project Terraform runs as user tfsandbox with a scrubbed environment: it can't read the
+      # OIDC request credentials, the runtime token or the runner's files (scripts/tf_sandbox.sh).
+      - name: Set up the Terraform sandbox
         env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
+        run: bash "$TOOLS/scripts/tf_sandbox.sh" setup "$GITHUB_WORKSPACE"
+
+      - name: terraform init (sandbox)
+        env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
           STATE_BUCKET: ${{ inputs.state_bucket }}
+          AWS_REGION: ${{ inputs.aws_region }}
         run: |
           set -euo pipefail
           args=(-input=false -lockfile=readonly)
           [ -z "$STATE_BUCKET" ] || args+=("-backend-config=bucket=${STATE_BUCKET}")
-          terraform init "${args[@]}"
+          bash "$TOOLS/scripts/tf_sandbox.sh" run "$TF_DIR" init "${args[@]}"
 
       # Plain plan output in the log: Terraform redacts sensitive values there.
-      - name: terraform plan
-        working-directory: ${{ inputs.tf_dir }}
+      - name: terraform plan (sandbox)
+        env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
+          AWS_REGION: ${{ inputs.aws_region }}
         run: |
           set -euo pipefail
-          terraform plan -input=false -lock=false -no-color -out=tfplan
+          bash "$TOOLS/scripts/tf_sandbox.sh" run "$TF_DIR" plan -input=false -lock=false -no-color -out=tfplan
 
       # The JSON form holds every value in clear text: it stays in RUNNER_TEMP, only the
       # report script reads it (masks + name filter + truncation), and it is deleted straight after.
       - name: Summarise the plan
         id: report
-        working-directory: ${{ inputs.tf_dir }}
         env:
           TOOLS: ${{ steps.tools.outputs.dir }}
           TARGET: ${{ inputs.target }}
           DEPLOYABLE: ${{ inputs.deploy_enabled }}
+          AWS_REGION: ${{ inputs.aws_region }}
         run: |
           set -euo pipefail
           plan_json="$RUNNER_TEMP/plan.json"
-          trap 'rm -f "$plan_json"' EXIT
-          terraform show -json tfplan > "$plan_json"
+          plan_txt="$RUNNER_TEMP/plan.txt"
+          trap 'rm -f "$plan_json" "$plan_txt"' EXIT
+          bash "$TOOLS/scripts/tf_sandbox.sh" run "$TF_DIR" show -json tfplan > "$plan_json"
           now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           expires=$(date -u -d '+2 hours' +%Y-%m-%dT%H:%M:%SZ)
           subject=$(git log -1 --format=%s "$GITHUB_SHA" | tr -cd '[:print:]' | cut -c1-120)
@@ -190,11 +205,12 @@ jobs:
             --meta "deployable=$DEPLOYABLE" --meta "allow_destroy_requested=$ALLOW_DESTROY" \
             --meta "commit_subject=$subject" --meta "bundle_sha256=null" \
             || { rc=$?; [ "$rc" -eq 4 ] || exit "$rc"; }
+          bash "$TOOLS/scripts/tf_sandbox.sh" run "$TF_DIR" show -no-color tfplan > "$plan_txt"
           {
             echo "<details><summary>Plan diff (terraform show, sensitive values redacted, truncated)</summary>"
             echo
             echo '```'
-            terraform show -no-color tfplan | head -c 60000
+            head -c 60000 "$plan_txt"
             echo
             echo '```'
             echo "</details>"
@@ -221,7 +237,8 @@ jobs:
 
       # Bundle = the saved plan + the build files it was made from + the commit. tf-apply applies
       # exactly these bytes. Not produced without a deploy role (nothing could apply it, and a
-      # saved plan can hold sensitive values).
+      # saved plan can hold sensitive values). The sandbox tree is untrusted: bundle.py skips
+      # links and non-regular files, and the tfplan must be a regular file.
       - name: Bundle the plan
         id: bundle
         if: steps.report.outputs.has_changes == 'true' && inputs.deploy_enabled
@@ -230,17 +247,21 @@ jobs:
           GLOBS: ${{ inputs.bundle_globs }}
         run: |
           set -euo pipefail
+          out_dir="$RUNNER_TEMP/tf-out"
+          bash "$TOOLS/scripts/tf_sandbox.sh" export "$out_dir"
+          tfplan="$out_dir/$TF_DIR/tfplan"
+          [ -f "$tfplan" ] && [ ! -L "$tfplan" ] || { echo "::error::tfplan is not a regular file"; exit 1; }
           args=()
           while IFS= read -r g; do
             g=$(printf '%s' "$g" | xargs)
             [ -z "$g" ] || args+=(--glob "$g")
           done <<< "$GLOBS"
-          out=$(python3 -I "$TOOLS/scripts/bundle.py" create --root "$GITHUB_WORKSPACE" \
-            --tfplan "$TF_DIR/tfplan" --source "$GITHUB_SHA" --out "$RUNNER_TEMP/plan-bundle.tar" "${args[@]}")
+          out=$(python3 -I "$TOOLS/scripts/bundle.py" create --root "$out_dir" \
+            --tfplan "$tfplan" --source "$GITHUB_SHA" --out "$RUNNER_TEMP/plan-bundle.tar" "${args[@]}")
+          rm -rf "$out_dir"
           sum=$(printf '%s\n' "$out" | sed -n 's/^sha256=//p')
           files=$(printf '%s\n' "$out" | sed -n 's/^files=//p')
           [[ "$sum" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::bundle sha256 missing"; exit 1; }
-          echo "sha256=$sum" >> "$GITHUB_OUTPUT"
           python3 -I - "$RUNNER_TEMP/plan-summary.json" "$sum" <<'PY'
           import json, sys
           p, s = sys.argv[1], sys.argv[2]
@@ -252,42 +273,11 @@ jobs:
               json.dump(d, f, indent=1, sort_keys=True, ensure_ascii=False)
               f.write("\n")
           PY
+          {
+            echo "sha256=$sum"
+            echo "summary_sha256=$(sha256sum "$RUNNER_TEMP/plan-summary.json" | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
           echo "Plan bundle sha256: \`$sum\` (build files: $files)" >> "$GITHUB_STEP_SUMMARY"
-
-      # Guardian F1: any other job in this run could replace the artifacts. An OIDC token minted
-      # HERE (job_workflow_ref = tf-plan.yml@main, which no other job can carry) whose audience
-      # commits to the bundle and the final plan-summary.json makes a swap detectable by
-      # tf-apply and Orion. Not an AWS credential: its aud is not sts.amazonaws.com.
-      - name: Attest the bundle and summary (OIDC token over the manifest)
-        id: attest
-        if: steps.bundle.outputs.sha256 != ''
-        env:
-          TOOLS: ${{ steps.tools.outputs.dir }}
-        run: |
-          set -euo pipefail
-          dir="$RUNNER_TEMP/plan-attestation"
-          mkdir -p "$dir"
-          aud=$(python3 -I "$TOOLS/scripts/attest.py" manifest --repo "$GITHUB_REPOSITORY" \
-            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --sha "$GITHUB_SHA" \
-            --bundle "$RUNNER_TEMP/plan-bundle.tar" --summary "$RUNNER_TEMP/plan-summary.json" \
-            --out "$dir/manifest.json" | sed -n 's/^aud=//p')
-          [[ "$aud" =~ ^deploy-workflows-plan:v1:[0-9a-f]{64}$ ]] || { echo "::error::bad audience"; exit 1; }
-          curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=${aud//:/%3A}" \
-            | python3 -Ic 'import json,sys; sys.stdout.write(json.load(sys.stdin)["value"])' > "$dir/token.jwt"
-          [ -s "$dir/token.jwt" ] || { echo "::error::no attestation token"; exit 1; }
-          echo "Plan attestation audience: \`$aud\`" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload the plan attestation
-        if: steps.attest.outcome == 'success'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: plan-attestation
-          path: |
-            ${{ runner.temp }}/plan-attestation/manifest.json
-            ${{ runner.temp }}/plan-attestation/token.jwt
-          retention-days: 1
-          if-no-files-found: error
 
       - name: Upload the plan bundle
         if: steps.bundle.outputs.sha256 != ''
@@ -316,4 +306,21 @@ jobs:
 
       - name: Remove the saved plan from the runner
         if: always()
-        run: rm -f "$TF_DIR/tfplan" "$RUNNER_TEMP/plan-bundle.tar"
+        run: |
+          rm -f "$RUNNER_TEMP/plan-bundle.tar"
+          sudo rm -rf /home/tfsandbox/src /home/tfsandbox/.aws "$RUNNER_TEMP/tf-out" || true
+
+  # Guardian F1 + review of f63cf2e: the attestation token is minted in a separate job that runs
+  # no project code, from a separate workflow file, so its job_workflow_ref (tf-attest.yml) is
+  # one the plan job can never carry. It re-hashes the uploaded artifacts against the plan job's
+  # outputs (job outputs can't be changed by other jobs).
+  attest:
+    name: attest
+    needs: plan
+    if: needs.plan.outputs.bundle_sha256 != ''
+    permissions:
+      id-token: write
+    uses: tobipjuk/deploy-workflows/.github/workflows/tf-attest.yml@main
+    with:
+      bundle_sha256: ${{ needs.plan.outputs.bundle_sha256 }}
+      summary_sha256: ${{ needs.plan.outputs.summary_sha256 }}

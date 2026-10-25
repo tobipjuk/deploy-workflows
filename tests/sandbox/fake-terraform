@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Plays a hostile Terraform config: look for the runner's secrets everywhere it can.
+[ "${1:-}" = probe ] || { echo "plan bytes" > tfplan; exit 0; }
+echo "PWD-OK $(basename "$PWD")"
+echo "REGION ${AWS_REGION:-none}"
+env
+cat /proc/self/environ 2>/dev/null | tr '\0' '\n'
+for p in /proc/[0-9]*; do cat "$p/environ" 2>/dev/null | tr '\0' '\n'; done
+cat /home/runner/work/_temp/step.sh /home/runner/.aws/credentials 2>&1
+find /home/runner -maxdepth 1 2>&1 | head -3
+grep -q AKIAEXAMPLE "$HOME/.aws/credentials" && echo AWSCREDS-OK
+cat "$HOME/src/.git/config" 2>&1
+sudo -n true 2>/dev/null && echo SUDO-ALLOWED || echo SUDO-DENIED
+echo "plan bytes" > tfplan
+ln -s /home/runner/.aws/credentials evil-link

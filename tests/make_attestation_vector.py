@@ -43,11 +43,11 @@ def build():
     key = kit.generate_key()
     kid = "test-key-1"
     claims = {
-        "iss": at.ISSUER, "aud": aud, "sub": f"repo:{REPO}:ref:refs/heads/main:event_name:push:actor:tobipjuk:run_attempt:1:job_workflow_ref:{at.PLAN_WORKFLOW_REF}",
+        "iss": at.ISSUER, "aud": aud, "sub": f"repo:{REPO}:ref:refs/heads/main:event_name:push:actor:tobipjuk:run_attempt:1:job_workflow_ref:{at.ATTEST_WORKFLOW_REF}",
         "repository": REPO, "repository_owner": "tobipjuk", "ref": "refs/heads/main", "sha": SHA,
         "event_name": "push", "actor": "tobipjuk", "run_id": str(RUN_ID), "run_number": "7", "run_attempt": "1",
         "workflow_ref": f"{REPO}/.github/workflows/plan.yml@refs/heads/main",
-        "job_workflow_ref": at.PLAN_WORKFLOW_REF, "runner_environment": "github-hosted",
+        "job_workflow_ref": at.ATTEST_WORKFLOW_REF, "runner_environment": "github-hosted",
         "iat": IAT, "nbf": IAT - 5, "exp": IAT + 300,
     }
     return {

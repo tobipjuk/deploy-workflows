@@ -16,8 +16,10 @@ also one tf-apply accepts:
     newer commit on main supersedes it
   - it is the newest successful plan run on main
   - it started less than --max-age-seconds ago (2 h)
-  - every referenced reusable workflow is from deploy-workflows at refs/heads/main
-  - it has exactly one job over all attempts (no extra job that could swap artifacts)
+  - it referenced tf-plan.yml and tf-attest.yml, and every referenced reusable workflow is
+    from deploy-workflows at refs/heads/main
+  - it has exactly two jobs over all attempts (tf-plan's plan job and the nested attest job),
+    both completed/success: no extra job that could swap or self-attest artifacts
 """
 import argparse
 import datetime as dt
@@ -54,20 +56,32 @@ def evaluate(run, latest_id, now, repo, expected_sha, plan_workflow, reusable, m
     if run.get("head_sha") != expected_sha:
         problems.append("plan was made from another commit than main's head (superseded)")
     refs = run.get("referenced_workflows") or []
-    if not any(str(r.get("path", "")).startswith(reusable + "@") and r.get("ref") == "refs/heads/main"
-               for r in refs):
-        problems.append(f"run did not use {reusable}@refs/heads/main")
+    attest = reusable.rsplit("/", 1)[0] + "/tf-attest.yml"
+    for wf in (reusable, attest):
+        if not any(str(r.get("path", "")).startswith(wf + "@") and r.get("ref") == "refs/heads/main"
+                   for r in refs):
+            problems.append(f"run did not use {wf}@refs/heads/main")
     # Every reusable workflow in the run must come from deploy-workflows' main: a box-written
     # plan.yml must not pull in anything else.
     anchor = reusable.split("/.github/")[0] + "/"
     for r in refs:
         if not (str(r.get("path", "")).startswith(anchor) and r.get("ref") == "refs/heads/main"):
             problems.append(f"run references a workflow outside {anchor}@refs/heads/main: {r.get('path')!r}")
-    # Exactly one job (the tf-plan job), over all attempts: an extra job in the same run could
-    # replace the run's artifacts (Guardian F1); a re-run adds jobs too.
+    # Exactly the two jobs of tf-plan.yml, over all attempts, both successful: the plan job
+    # ("<caller> / terraform plan") and the nested attest job ("<caller> / attest / attest plan
+    # artifacts"). An extra job in the same run could replace the artifacts or call tf-attest.yml
+    # on artifacts of its own (Guardian F1); a re-run adds jobs too. Names alone are spoofable
+    # (callers choose the prefix); count + success + the referenced workflows carry the check.
     if jobs is not None:
-        if len(jobs) != 1:
-            problems.append(f"plan run has {len(jobs)} jobs (all attempts); exactly 1 (tf-plan) is required")
+        names = sorted(str((j or {}).get("name", "")) for j in jobs)
+        if len(jobs) != 2:
+            problems.append(f"plan run has {len(jobs)} jobs (all attempts); exactly 2 (plan + attest) are required")
+        elif not (any(n.endswith(" / terraform plan") for n in names)
+                  and any(n.endswith(" / attest / attest plan artifacts") for n in names)):
+            problems.append(f"plan run jobs are not tf-plan's plan + attest: {names}")
+        for j in jobs:
+            if (j or {}).get("status") != "completed" or (j or {}).get("conclusion") != "success":
+                problems.append(f"plan run job {(j or {}).get('name')!r} is not completed/success")
     if latest_id is None or int(latest_id) != int(run.get("id", -1)):
         problems.append("a newer successful plan run exists on main (superseded)")
     try:

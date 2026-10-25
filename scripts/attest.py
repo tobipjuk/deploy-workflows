@@ -3,8 +3,9 @@
 
 Why: any job in the project's plan.yml run (which the box can write) can replace the run's
 artifacts. A GitHub OIDC token whose `aud` commits to the artifact hashes, minted inside
-tf-plan.yml, can't be forged by such a job: its token would carry the caller's
-job_workflow_ref, not deploy-workflows' tf-plan.yml (see docs/orion-interface.md, section 4a).
+the nested tf-attest.yml job (which runs no project code), can't be forged by such a job, nor
+by the plan job's sandboxed Terraform: their tokens carry another job_workflow_ref (the
+caller's plan.yml, or tf-plan.yml). See docs/orion-interface.md, section 4a.
 
   attest.py manifest --repo R --run-id N --run-attempt N --sha SHA --bundle TAR --summary JSON
                      --out manifest.json
@@ -16,9 +17,9 @@ job_workflow_ref, not deploy-workflows' tf-plan.yml (see docs/orion-interface.md
                    [--expect-digest HEX]
 
 Manifest (canonical JSON: sorted keys, no whitespace, ASCII):
-  {"bundle_sha256": hex, "repo": "o/r", "run_attempt": int, "run_id": int, "schema": 1,
+  {"bundle_sha256": hex, "repo": "o/r", "run_attempt": int, "run_id": int, "schema": 2,
    "sha": hex40, "summary_sha256": hex, "type": "deploy-workflows-plan"}
-Audience: "deploy-workflows-plan:v1:" + sha256(canonical manifest bytes), lowercase hex.
+Audience: "deploy-workflows-plan:v2:" + sha256(canonical manifest bytes), lowercase hex.
 
 Signature check is RS256 (RSASSA-PKCS1-v1_5 + SHA-256) against GitHub's JWKS, implemented
 with the stdlib by comparing the full expected encoding (no padding parsing). Stdlib only.
@@ -35,8 +36,10 @@ import urllib.request
 
 ISSUER = "https://token.actions.githubusercontent.com"
 JWKS_URL = ISSUER + "/.well-known/jwks"
-AUD_PREFIX = "deploy-workflows-plan:v1:"
-PLAN_WORKFLOW_REF = "tobipjuk/deploy-workflows/.github/workflows/tf-plan.yml@refs/heads/main"
+AUD_PREFIX = "deploy-workflows-plan:v2:"
+# The token must come from the nested tf-attest.yml job (no project code), never from the plan
+# job (tf-plan.yml, which runs sandboxed project Terraform).
+ATTEST_WORKFLOW_REF = "tobipjuk/deploy-workflows/.github/workflows/tf-attest.yml@refs/heads/main"
 MIN_RSA_BITS = 2048
 CLOCK_SKEW = 120  # seconds of slack around the plan run window
 # DER prefix of DigestInfo for SHA-256 (RFC 8017, section 9.2 note 1)
@@ -62,7 +65,7 @@ def canonical(obj):
 def build_manifest(repo, run_id, run_attempt, sha, bundle_sha256, summary_sha256):
     m = {
         "bundle_sha256": bundle_sha256, "repo": repo, "run_attempt": int(run_attempt),
-        "run_id": int(run_id), "schema": 1, "sha": sha, "summary_sha256": summary_sha256,
+        "run_id": int(run_id), "schema": 2, "sha": sha, "summary_sha256": summary_sha256,
         "type": "deploy-workflows-plan",
     }
     check_manifest_shape(m)
@@ -73,7 +76,7 @@ def check_manifest_shape(m):
     if not isinstance(m, dict) or set(m) != {"bundle_sha256", "repo", "run_attempt", "run_id", "schema",
                                              "sha", "summary_sha256", "type"}:
         raise AttestationError("manifest has unexpected fields")
-    if m["schema"] != 1 or m["type"] != "deploy-workflows-plan":
+    if m["schema"] != 2 or m["type"] != "deploy-workflows-plan":
         raise AttestationError("manifest schema/type")
     for k in ("bundle_sha256", "summary_sha256"):
         if not isinstance(m[k], str) or not re.fullmatch(r"[0-9a-f]{64}", m[k]):
@@ -127,6 +130,8 @@ def verify_jwt(token, jwks):
     if not isinstance(header, dict) or header.get("alg") != "RS256":
         raise AttestationError("token alg is not RS256")
     kid = header.get("kid")
+    if not isinstance(kid, str) or not kid:
+        raise AttestationError("token kid is missing or not a string")
     keys = [k for k in (jwks or {}).get("keys", []) if isinstance(k, dict) and k.get("kid") == kid]
     if len(keys) != 1:
         raise AttestationError("signing key not found in JWKS")
@@ -166,7 +171,7 @@ def verify(token, manifest_bytes, jwks, bundle_path, summary_path, repo, run_id,
         raise AttestationError("token audience does not match the manifest")
     checks = {
         "iss": ISSUER,
-        "job_workflow_ref": PLAN_WORKFLOW_REF,
+        "job_workflow_ref": ATTEST_WORKFLOW_REF,
         "repository": repo,
         "run_id": str(run_id),
         "run_attempt": str(run_attempt),
@@ -208,6 +213,19 @@ def verify(token, manifest_bytes, jwks, bundle_path, summary_path, repo, run_id,
     return claims
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise AttestationError(f"JWKS fetch was redirected ({code}); refusing")
+
+
+def fetch_jwks(url):
+    opener = urllib.request.build_opener(_NoRedirect)
+    with opener.open(url, timeout=30) as r:
+        if r.status != 200:
+            raise AttestationError(f"JWKS fetch returned {r.status}")
+        return json.loads(r.read(1 << 20))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -235,8 +253,7 @@ def main(argv=None):
         if args.jwks_url:
             if args.jwks_url != JWKS_URL:
                 raise AttestationError("only GitHub's JWKS URL is accepted")
-            with urllib.request.urlopen(args.jwks_url, timeout=30) as r:
-                jwks = json.load(r)
+            jwks = fetch_jwks(args.jwks_url)
         else:
             with open(args.jwks, encoding="utf-8") as f:
                 jwks = json.load(f)
@@ -247,7 +264,7 @@ def main(argv=None):
         verify(token, manifest_bytes, jwks, args.bundle, args.summary, args.repo, args.run_id,
                args.run_attempt, args.sha, args.not_before, args.not_after,
                args.expect_bundle_sha256, args.expect_digest)
-        print("plan attestation ok: bundle and summary were produced by tf-plan.yml@main in this run")
+        print("plan attestation ok: bundle and summary attested by tf-attest.yml@main in this run")
         return 0
     except (OSError, ValueError, KeyError, UnicodeDecodeError) as e:
         print(f"::error::plan attestation: {e}"[:400], file=sys.stderr)

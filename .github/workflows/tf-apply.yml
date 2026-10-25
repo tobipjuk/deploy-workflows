@@ -151,7 +151,7 @@ jobs:
         id: tools
         uses: tobipjuk/deploy-workflows/.github/actions/tools@main
 
-      - name: Check the plan run (main, newest, < 2 h, one job, made by tf-plan.yml)
+      - name: Check the plan run (main, newest, < 2 h, exactly plan + attest jobs of tf-plan.yml)
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TOOLS: ${{ steps.tools.outputs.dir }}
@@ -182,8 +182,10 @@ jobs:
           run-id: ${{ github.event.inputs.plan_run_id }}
           github-token: ${{ github.token }}
 
-      # Guardian F1: the artifacts must be the ones tf-plan.yml@main produced in that run.
-      # Verifies the OIDC token (GitHub JWKS signature, iss, job_workflow_ref tf-plan.yml@main,
+      # Guardian F1: the artifacts must be the ones attested in that run by the nested
+      # tf-attest.yml job (no project code). Verifies the OIDC token (GitHub JWKS signature, no
+      # redirects, iss, job_workflow_ref tf-attest.yml@main (NOT tf-plan.yml: the plan job runs
+      # project Terraform),
       # repository, run_id, run_attempt, sha, iat inside the run) and that its aud commits to
       # the sha256 of the downloaded bundle and plan-summary.json; the bundle is the approved
       # one and the summary's digest is the approved digest.
@@ -261,7 +263,8 @@ jobs:
           role-session-name: gh-deploy-${{ github.run_id }}
           role-duration-seconds: 3600
           aws-region: ${{ inputs.aws_region }}
-          aws-profile: ${{ inputs.aws_profile }}
+          # Written to ~/.aws (not env): the Terraform sandbox gets a copy of this profile only.
+          aws-profile: ${{ inputs.aws_profile || 'default' }}
           allowed-account-ids: ${{ inputs.aws_account_id }}
 
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
@@ -269,45 +272,58 @@ jobs:
           terraform_version: ${{ inputs.terraform_version }}
           terraform_wrapper: false
 
-      - name: terraform init
-        working-directory: ${{ inputs.tf_dir }}
+      # Project Terraform (and its providers) run as user tfsandbox with a scrubbed environment:
+      # no OIDC request credentials, runtime token or runner files (scripts/tf_sandbox.sh). The
+      # sandbox gets the verified checkout, the verified tfplan and build files, and the profile.
+      - name: Set up the Terraform sandbox
         env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
+        run: bash "$TOOLS/scripts/tf_sandbox.sh" setup "$GITHUB_WORKSPACE"
+
+      - name: terraform init (sandbox)
+        env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
           STATE_BUCKET: ${{ inputs.state_bucket }}
+          AWS_REGION: ${{ inputs.aws_region }}
         run: |
           set -euo pipefail
           args=(-input=false -lockfile=readonly)
           [ -z "$STATE_BUCKET" ] || args+=("-backend-config=bucket=${STATE_BUCKET}")
-          terraform init "${args[@]}"
+          bash "$TOOLS/scripts/tf_sandbox.sh" run "$TF_DIR" init "${args[@]}"
 
       # Recomputed from the plan file itself: the digest must equal the one Tobi approved,
       # and destroy / code execution / provider gates run again here.
       - name: Gates (approved digest, destroy, code execution, providers)
         id: gate
-        working-directory: ${{ inputs.tf_dir }}
         env:
           TOOLS: ${{ steps.tools.outputs.dir }}
+          AWS_REGION: ${{ inputs.aws_region }}
         run: |
           set -euo pipefail
           plan_json="$RUNNER_TEMP/plan.json"
           trap 'rm -f "$plan_json"' EXIT
-          terraform show -json tfplan > "$plan_json"
+          bash "$TOOLS/scripts/tf_sandbox.sh" run "$TF_DIR" show -json tfplan > "$plan_json"
           python3 -I "$TOOLS/scripts/plan_report.py" "$plan_json" \
             --summary "$GITHUB_STEP_SUMMARY" --outputs "$GITHUB_OUTPUT" \
             --addresses "$RUNNER_TEMP/changed-addresses.txt" \
             --allowed-providers "$TOOLS/policy/allowed-providers.txt" \
             --expect-digest "$CHANGES_DIGEST" --allow-destroy "$ALLOW_DESTROY"
 
-      - name: terraform apply (saved plan)
-        working-directory: ${{ inputs.tf_dir }}
+      - name: terraform apply (saved plan, sandbox)
+        env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
+          AWS_REGION: ${{ inputs.aws_region }}
         run: |
           set -euo pipefail
-          terraform apply -input=false -no-color tfplan
+          bash "$TOOLS/scripts/tf_sandbox.sh" run "$TF_DIR" apply -input=false -no-color tfplan
 
       - name: Invalidate CloudFront
         if: inputs.invalidate != ''
-        working-directory: ${{ inputs.tf_dir }}
         env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
           INVALIDATE: ${{ inputs.invalidate }}
+          AWS_REGION: ${{ inputs.aws_region }}
+          AWS_PROFILE: ${{ inputs.aws_profile || 'default' }}
         run: |
           set -euo pipefail
           ids=()
@@ -322,7 +338,7 @@ jobs:
             if [ -n "$prefix" ] && ! grep -qF -- "$prefix" <(cut -c1-"${#prefix}" "$RUNNER_TEMP/changed-addresses.txt"); then
               echo "skip $out (no change under $prefix)"; continue
             fi
-            dist=$(terraform output -raw "$out")
+            dist=$(bash "$TOOLS/scripts/tf_sandbox.sh" run "$TF_DIR" output -raw "$out")
             [[ "$dist" =~ ^E[A-Z0-9]{5,20}$ ]] || { echo "::error::Output $out is not a distribution id"; exit 1; }
             inv=$(aws cloudfront create-invalidation --distribution-id "$dist" --paths '/*' \
               --query Invalidation.Id --output text)
@@ -376,6 +392,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -f "$TF_DIR/tfplan"
+          sudo rm -rf /home/tfsandbox/src /home/tfsandbox/.aws || true
           python3 -I - "$RUNNER_TEMP/deploy-result.json" <<'PY'
           import json, os, sys
           e = os.environ

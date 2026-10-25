@@ -104,8 +104,11 @@ class AttestTest(unittest.TestCase):
     def test_token_from_another_job_rejected(self):
         # A box-added job in plan.yml can mint a token with any aud, but its job_workflow_ref is
         # the caller's workflow, not deploy-workflows' tf-plan.yml.
+        # The plan job's own token (tf-plan.yml@main, it runs sandboxed project Terraform) must
+        # not count either: only the nested tf-attest.yml job attests.
         for ref in ("tobipjuk/starhuntercrew/.github/workflows/plan.yml@refs/heads/main",
-                    "tobipjuk/deploy-workflows/.github/workflows/tf-plan.yml@refs/heads/feature",
+                    "tobipjuk/deploy-workflows/.github/workflows/tf-plan.yml@refs/heads/main",
+                    "tobipjuk/deploy-workflows/.github/workflows/tf-attest.yml@refs/heads/feature",
                     "tobipjuk/deploy-workflows/.github/workflows/tf-apply.yml@refs/heads/main"):
             token = self.resign(job_workflow_ref=ref)
             with self.assertRaisesRegex(at.AttestationError, "job_workflow_ref"):
@@ -167,6 +170,53 @@ class AttestTest(unittest.TestCase):
             p = kit.b64u(json.dumps(self.claims).encode())
             with self.assertRaisesRegex(at.AttestationError, "RS256"):
                 self.verify(token=f"{h}.{p}.", jwks=self.jwks)
+
+    def test_kid_must_be_nonempty_string(self):
+        p = kit.b64u(json.dumps(self.claims).encode())
+        for header in ({"alg": "RS256"}, {"alg": "RS256", "kid": ""}, {"alg": "RS256", "kid": 7},
+                       {"alg": "RS256", "kid": None}):
+            h = kit.b64u(json.dumps(header).encode())
+            # a JWKS key without kid must not match a token without kid
+            jwks = {"keys": [{k: v for k, v in self.jwks["keys"][0].items() if k != "kid"}]}
+            with self.assertRaisesRegex(at.AttestationError, "kid"):
+                self.verify(token=f"{h}.{p}.AAAA", jwks=jwks)
+
+    def test_jwks_fetch_refuses_redirects(self):
+        import http.server
+        import threading
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                if self.path == "/jwks":
+                    self.send_response(302)
+                    self.send_header("Location", "/other")
+                    self.end_headers()
+                else:
+                    body = json.dumps(VECTOR["jwks"]).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            base = f"http://127.0.0.1:{srv.server_port}"
+            self.assertEqual(at.fetch_jwks(base + "/other"), VECTOR["jwks"])
+            with self.assertRaisesRegex(at.AttestationError, "redirect"):
+                at.fetch_jwks(base + "/jwks")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_vector_job_workflow_ref_is_tf_attest(self):
+        self.assertEqual(self.claims["job_workflow_ref"],
+                         "tobipjuk/deploy-workflows/.github/workflows/tf-attest.yml@refs/heads/main")
+        self.assertTrue(VECTOR["aud"].startswith("deploy-workflows-plan:v2:"))
 
     def test_weak_key_refused(self):
         small = kit.generate_key(bits=1024)

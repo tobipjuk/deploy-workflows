@@ -25,6 +25,9 @@ REPO = "tobipjuk/starhuntercrew"
 SHA = "c" * 40
 NOW = dt.datetime(2026, 10, 25, 12, 0, tzinfo=dt.timezone.utc)
 REUSABLE = "tobipjuk/deploy-workflows/.github/workflows/tf-plan.yml"
+ATTEST = "tobipjuk/deploy-workflows/.github/workflows/tf-attest.yml"
+JOBS = [{"name": "plan / terraform plan", "status": "completed", "conclusion": "success"},
+        {"name": "plan / attest / attest plan artifacts", "status": "completed", "conclusion": "success"}]
 
 
 def run(**over):
@@ -32,7 +35,8 @@ def run(**over):
         "id": 42, "path": ".github/workflows/plan.yml", "repository": {"full_name": REPO},
         "head_repository": {"full_name": REPO}, "head_branch": "main", "event": "push",
         "status": "completed", "conclusion": "success", "head_sha": SHA,
-        "referenced_workflows": [{"path": REUSABLE + "@main", "ref": "refs/heads/main", "sha": "d" * 40}],
+        "referenced_workflows": [{"path": REUSABLE + "@main", "ref": "refs/heads/main", "sha": "d" * 40},
+                                 {"path": ATTEST + "@main", "ref": "refs/heads/main", "sha": "d" * 40}],
         "run_started_at": "2026-10-25T11:00:00Z",
     }
     r.update(over)
@@ -69,19 +73,30 @@ class PlanRunTest(unittest.TestCase):
         self.assertTrue(ev(run(referenced_workflows=[])))
         self.assertTrue(ev(run(referenced_workflows=None)))
 
-    def test_job_count(self):
-        self.assertEqual(cpr.evaluate(run(), 42, NOW, REPO, SHA, ".github/workflows/plan.yml", REUSABLE, 7200,
-                                      jobs=[{"name": "plan / terraform plan"}]), [])
-        for jobs in ([], [{}, {}], [{}, {}, {}]):
-            problems = cpr.evaluate(run(), 42, NOW, REPO, SHA, ".github/workflows/plan.yml", REUSABLE, 7200, jobs=jobs)
-            self.assertTrue(any("exactly 1" in p for p in problems), jobs)
+    def test_job_set(self):
+        def jev(jobs):
+            return cpr.evaluate(run(), 42, NOW, REPO, SHA, ".github/workflows/plan.yml", REUSABLE, 7200, jobs=jobs)
+        self.assertEqual(jev(JOBS), [])
+        extra = {"name": "evil", "status": "completed", "conclusion": "success"}
+        for jobs in ([], JOBS[:1], JOBS + [extra], [JOBS[0], JOBS[0]],
+                     [JOBS[0], {**JOBS[1], "conclusion": "skipped"}],
+                     [JOBS[0], {**JOBS[1], "name": "plan / attest"}]):
+            self.assertTrue(jev(jobs), jobs)
+
+    def test_attest_workflow_required(self):
+        problems = ev(run(referenced_workflows=[{"path": REUSABLE + "@main", "ref": "refs/heads/main"}]))
+        self.assertTrue(any("tf-attest.yml" in p for p in problems))
+        # box-written plan.yml calling tf-attest directly (no tf-plan): refused
+        problems = ev(run(referenced_workflows=[{"path": ATTEST + "@main", "ref": "refs/heads/main"}]))
+        self.assertTrue(any("tf-plan.yml" in p for p in problems))
 
     def test_every_referenced_workflow_from_anchor_main(self):
-        good = {"path": REUSABLE + "@main", "ref": "refs/heads/main", "sha": "d" * 40}
+        good = [{"path": REUSABLE + "@main", "ref": "refs/heads/main", "sha": "d" * 40},
+                {"path": ATTEST + "@main", "ref": "refs/heads/main", "sha": "d" * 40}]
         for extra in ({"path": "evil/repo/.github/workflows/x.yml@main", "ref": "refs/heads/main"},
                       {"path": "tobipjuk/deploy-workflows/.github/workflows/tf-plan.yml@dev", "ref": "refs/heads/dev"},
                       {"path": "tobipjuk/deploy-workflows-evil/.github/workflows/tf-plan.yml@main", "ref": "refs/heads/main"}):
-            problems = ev(run(referenced_workflows=[good, extra]))
+            problems = ev(run(referenced_workflows=good + [extra]))
             self.assertTrue(any("outside" in p for p in problems), extra)
 
     def test_newer_run_supersedes(self):

@@ -1,0 +1,100 @@
+# Reusable (nested): attest a plan's artifacts. Called ONLY from tf-plan.yml as its second job.
+#
+# Why a separate file: the attestation token's job_workflow_ref is then
+#   tobipjuk/deploy-workflows/.github/workflows/tf-attest.yml@refs/heads/main
+# which the plan job (it runs project Terraform, sandboxed) can never carry, even if it escaped
+# the sandbox and reached the OIDC request credentials. This job runs no project code: no
+# checkout, only the deploy-workflows tools, the two artifacts of this run, and a token request.
+#
+# A box-written plan.yml could call this file directly to attest artifacts it made itself.
+# tf-apply and Orion refuse such runs: the plan run must consist of exactly the two jobs of
+# tf-plan.yml (plan + this one), both successful, referencing tf-plan.yml and tf-attest.yml from
+# deploy-workflows@refs/heads/main and nothing else (scripts/check_plan_run.py), so there is
+# no room for an extra job that uploads or swaps artifacts.
+name: tf-attest (reusable, nested)
+
+on:
+  workflow_call:
+    inputs:
+      bundle_sha256:
+        description: sha256 of plan-bundle.tar as computed by the plan job
+        type: string
+        required: true
+      summary_sha256:
+        description: sha256 of plan-summary.json as computed by the plan job
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  attest:
+    name: attest plan artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+    steps:
+      - name: deploy-workflows tools
+        id: tools
+        uses: tobipjuk/deploy-workflows/.github/actions/tools@main
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plan-bundle
+          path: ${{ runner.temp }}/in/bundle
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plan-summary
+          path: ${{ runner.temp }}/in/summary
+
+      - name: Check the artifacts against the plan job's hashes
+        env:
+          WANT_BUNDLE: ${{ inputs.bundle_sha256 }}
+          WANT_SUMMARY: ${{ inputs.summary_sha256 }}
+        run: |
+          set -euo pipefail
+          in="$RUNNER_TEMP/in"
+          [[ "$WANT_BUNDLE" =~ ^[0-9a-f]{64}$ && "$WANT_SUMMARY" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::bad hash inputs"; exit 1; }
+          [ "$(ls -A "$in/bundle")" = "plan-bundle.tar" ] || { echo "::error::unexpected plan-bundle content"; exit 1; }
+          [ "$(ls -A "$in/summary")" = "plan-summary.json" ] || { echo "::error::unexpected plan-summary content"; exit 1; }
+          [ "$(sha256sum "$in/bundle/plan-bundle.tar" | cut -d' ' -f1)" = "$WANT_BUNDLE" ] || { echo "::error::plan-bundle changed since the plan job"; exit 1; }
+          [ "$(sha256sum "$in/summary/plan-summary.json" | cut -d' ' -f1)" = "$WANT_SUMMARY" ] || { echo "::error::plan-summary changed since the plan job"; exit 1; }
+          python3 -I - "$in/summary/plan-summary.json" "$WANT_BUNDLE" <<'PY'
+          import json, os, sys
+          d = json.load(open(sys.argv[1], encoding="utf-8"))
+          e = os.environ
+          ok = (d.get("bundle_sha256") == sys.argv[2] and d.get("sha") == e["GITHUB_SHA"]
+                and str(d.get("run_id")) == e["GITHUB_RUN_ID"] and d.get("repo") == e["GITHUB_REPOSITORY"])
+          sys.exit(0 if ok else "::error::plan-summary does not describe this run's bundle")
+          PY
+
+      - name: Mint the attestation token
+        env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
+        run: |
+          set -euo pipefail
+          in="$RUNNER_TEMP/in"
+          dir="$RUNNER_TEMP/plan-attestation"
+          mkdir -p "$dir"
+          aud=$(python3 -I "$TOOLS/scripts/attest.py" manifest --repo "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --sha "$GITHUB_SHA" \
+            --bundle "$in/bundle/plan-bundle.tar" --summary "$in/summary/plan-summary.json" \
+            --out "$dir/manifest.json" | sed -n 's/^aud=//p')
+          [[ "$aud" =~ ^deploy-workflows-plan:v2:[0-9a-f]{64}$ ]] || { echo "::error::bad audience"; exit 1; }
+          curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=${aud//:/%3A}" \
+            | python3 -Ic 'import json,sys; sys.stdout.write(json.load(sys.stdin)["value"])' > "$dir/token.jwt"
+          [ -s "$dir/token.jwt" ] || { echo "::error::no attestation token"; exit 1; }
+          echo "Plan attestation audience: \`$aud\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the plan attestation
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plan-attestation
+          path: |
+            ${{ runner.temp }}/plan-attestation/manifest.json
+            ${{ runner.temp }}/plan-attestation/token.jwt
+          retention-days: 1
+          if-no-files-found: error

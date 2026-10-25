@@ -60,9 +60,15 @@ Every 60 s, for each registered repo:
      `refs/heads/main`;
    - **every** `referenced_workflows` entry has a `path` starting with
      `tobipjuk/deploy-workflows/` and `ref == "refs/heads/main"`;
-   - **exactly one job** over all attempts:
-     `GET /repos/{o}/{r}/actions/runs/{run_id}/jobs?filter=all` → `total_count == 1`
-     (an extra job in the same run could replace the artifacts, see 4a; re-run plans are refused);
+   - `referenced_workflows` contains `tobipjuk/deploy-workflows/.github/workflows/tf-plan.yml@…`
+     **and** `…/tf-attest.yml@…`, both with `ref == "refs/heads/main"`;
+   - **exactly two jobs** over all attempts, both `status == "completed"` and
+     `conclusion == "success"`:
+     `GET /repos/{o}/{r}/actions/runs/{run_id}/jobs?filter=all&per_page=100` → `total_count == 2`,
+     one name ending in ` / terraform plan`, one ending in ` / attest / attest plan artifacts`
+     (an extra job could replace artifacts or call tf-attest.yml on artifacts of its own, see 4a;
+     names alone are spoofable, the count, success and references carry the check; re-run
+     plans are refused);
    - `head_sha` equals main's current head: `GET /repos/{o}/{r}/branches/main` → `commit.sha`;
    - age: `now - run_started_at < 2 h` (use the API's timestamp, not the summary's).
 4. A newer accepted plan for the same repo **supersedes** any older pending one: edit the older
@@ -131,11 +137,17 @@ sha256 = 3b67c029e1b57856cef4f4db0542dd374b4548e25f944a35389a94546f2d384e
 same run (`needs: plan`, `actions: write`) can download `plan-bundle`, keep the genuine tfplan,
 swap a Lambda zip, re-tar it, and re-upload `plan-bundle` and `plan-summary` with a matching
 `bundle_sha256` and any diff text. The changes digest covers only addresses and actions, so it
-wouldn't notice. Therefore tf-plan.yml, inside its own job, requests a GitHub OIDC token whose
-**audience commits to the sha256 of the bundle and of `plan-summary.json`**. Only a job running
-deploy-workflows' `tf-plan.yml@refs/heads/main` gets a token with that `job_workflow_ref`; a
-box-added job's token carries the project's own workflow ref. The token is not an AWS
-credential (its `aud` is not `sts.amazonaws.com`).
+wouldn't notice. Therefore tf-plan.yml's second job, the nested **`tf-attest.yml`** (a separate
+file, no checkout, no project code), downloads the two artifacts, re-checks them against the
+plan job's hashes (job outputs), and requests a GitHub OIDC token whose **audience commits to
+the sha256 of the bundle and of `plan-summary.json`**. Only that job carries
+`job_workflow_ref = tobipjuk/deploy-workflows/.github/workflows/tf-attest.yml@refs/heads/main`:
+a box-added job's token carries the project's own workflow ref, and the plan job's token carries
+`tf-plan.yml` (the plan job runs project Terraform, sandboxed, and must not be able to attest).
+A box-written `plan.yml` that calls `tf-attest.yml` directly is caught by the run-shape rules
+of section 3 (exactly tf-plan's two jobs, both files referenced). GitHub environments can't be
+used as the distinguishing claim: they aren't available for private repos on GitHub Free.
+The token is not an AWS credential (its `aud` is not `sts.amazonaws.com`).
 
 Artifact `plan-attestation` (zip, two members, each ≤ 64 KB; refuse anything else):
 
@@ -143,25 +155,27 @@ Artifact `plan-attestation` (zip, two members, each ≤ 64 KB; refuse anything e
 
   ```
   {"bundle_sha256":"<64 hex>","repo":"<owner>/<name>","run_attempt":<int>,"run_id":<int>,
-   "schema":1,"sha":"<40 hex>","summary_sha256":"<64 hex>","type":"deploy-workflows-plan"}
+   "schema":2,"sha":"<40 hex>","summary_sha256":"<64 hex>","type":"deploy-workflows-plan"}
   ```
 
   `bundle_sha256` = sha256 of `plan-bundle.tar`; `summary_sha256` = sha256 of the **exact bytes**
   of `plan-summary.json` (the whole file: changes, digest, diff, flags, everything shown).
 - `token.jwt`: the GitHub Actions OIDC token (compact JWS).
 
-**Audience format:** `deploy-workflows-plan:v1:` + lowercase hex sha256 of the manifest bytes
+**Audience format:** `deploy-workflows-plan:v2:` + lowercase hex sha256 of the manifest bytes
 exactly as stored (they must already be canonical: re-serialise and compare bytes; any
 difference = refuse).
 
 **Verification (Orion and tf-apply do the same):**
 
-1. JWT header `alg == "RS256"` (anything else, incl. `none`/`HS256`, = refuse); `kid` selects a
-   key from GitHub's JWKS `https://token.actions.githubusercontent.com/.well-known/jwks`
-   (`kty RSA`, ≥ 2048 bits); RSASSA-PKCS1-v1_5 SHA-256 signature valid.
+1. JWT header `alg == "RS256"` (anything else, incl. `none`/`HS256`, = refuse); `kid` is a
+   non-empty string and selects exactly one key from GitHub's JWKS
+   `https://token.actions.githubusercontent.com/.well-known/jwks` (fetch over HTTPS, **refuse
+   redirects**; `kty RSA`, ≥ 2048 bits); RSASSA-PKCS1-v1_5 SHA-256 signature valid.
 2. Claims: `iss == "https://token.actions.githubusercontent.com"`;
    `aud ==` the audience above (string, or a one-element array);
-   `job_workflow_ref == "tobipjuk/deploy-workflows/.github/workflows/tf-plan.yml@refs/heads/main"`;
+   `job_workflow_ref == "tobipjuk/deploy-workflows/.github/workflows/tf-attest.yml@refs/heads/main"`
+   (**not** tf-plan.yml);
    `repository ==` the registered repo; `run_id ==` the plan run id (string);
    `run_attempt ==` the run's `run_attempt` from the API (string); `sha ==` the run's `head_sha`;
    `ref == "refs/heads/main"`; `event_name` is `push` or `workflow_dispatch`;
@@ -179,8 +193,8 @@ difference = refuse).
 `bundle_sha256`, `summary_sha256`, `changes_digest`). Its values:
 
 ```
-manifest = {"bundle_sha256":"2a8a9d944458564abae006e269da069ea3903a114e98303372cbbefee254bfee","repo":"tobipjuk/starhuntercrew","run_attempt":1,"run_id":18234567890,"schema":1,"sha":"1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d","summary_sha256":"951100431a6f44c5e81ab15634792e3d0be522af39146ac015b94b882cff2945","type":"deploy-workflows-plan"}
-aud      = deploy-workflows-plan:v1:395d78925501c5e205e585f88defebda827878bf7e0d3418e9d298fc808d5af9
+manifest = {"bundle_sha256":"2a8a9d944458564abae006e269da069ea3903a114e98303372cbbefee254bfee","repo":"tobipjuk/starhuntercrew","run_attempt":1,"run_id":18234567890,"schema":2,"sha":"1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d","summary_sha256":"951100431a6f44c5e81ab15634792e3d0be522af39146ac015b94b882cff2945","type":"deploy-workflows-plan"}
+aud      = deploy-workflows-plan:v2:4d06d8f4086093a7d21ed8461141c2cdc4fa91577dd223e3697df5c02d534f6f
 ```
 
 The token verifies against the vector's `jwks` with `params`; flipping one byte of the bundle,
@@ -236,7 +250,7 @@ On `callback_query`:
 2. Look up the id: unknown, used, rejected, expired or superseded → answer "Expired" and do
    nothing.
 3. `Reject` → mark handled, edit the message to "Rejected by Tobi at HH:MM", remove buttons.
-4. `Approve` → re-check section 3 **now** (still the newest successful plan run, one job, main
+4. `Approve` → re-check section 3 **now** (still the newest successful plan run, the two jobs, main
    head unchanged, `< 2 h`) and that `plan-bundle` and `plan-attestation` are still present and
    unexpired (same artifact ids as when offered). Any failure:
    edit to "Not deployed: <reason>" and stop. Then dispatch (section 7).

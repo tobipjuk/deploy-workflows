@@ -30,7 +30,9 @@ Orion (server) polls plan runs ◄───────────────�
 | `.github/actions/tools` | Puts `scripts/` and `policy/` on the runner (always from this repo) |
 | `scripts/plan_report.py` | Plan summary, `plan-summary.json`, changes digest, destroy/code-execution/provider gates |
 | `scripts/bundle.py` | Creates and verifies the plan bundle |
-| `scripts/attest.py` | Plan attestation: manifest + audience, RS256/JWKS verification of the tf-plan OIDC token |
+| `.github/workflows/tf-attest.yml` | Nested in tf-plan.yml: attests the plan artifacts (no project code) |
+| `scripts/attest.py` | Plan attestation: manifest + audience, RS256/JWKS verification of the tf-attest OIDC token |
+| `scripts/tf_sandbox.sh` | Runs Terraform as an unprivileged user with a scrubbed environment |
 | `scripts/check_plan_run.py` | Is this plan run deployable (main, newest, < 2 h, made by tf-plan.yml)? |
 | `scripts/check_lockfile.py` | Provider allowlist, checked before `terraform init` |
 | `policy/allowed-providers.txt` | Providers a deploy may use |
@@ -100,11 +102,13 @@ tf-apply (with the deploy role; AWS has already checked actor/event/attempt/work
 
 - actor `<slug>[bot]`, triggering actor = actor, first attempt, ref main, input formats;
 - approval data read from the dispatch **event** (`github.event.inputs`), not from the caller's `with:`;
-- the plan run: `plan.yml`, this repo (not a fork), main, push/dispatch, success, exactly one
-  job (all attempts), every referenced workflow from deploy-workflows `@refs/heads/main` incl.
-  `tf-plan.yml`, made from main's current head, newest successful plan run, started < 2 h ago;
-- the plan attestation: OIDC token minted by tf-plan.yml@main in that run whose `aud` commits to
-  the sha256 of the downloaded bundle and `plan-summary.json` (Guardian F1);
+- the plan run: `plan.yml`, this repo (not a fork), main, push/dispatch, success, exactly the
+  two jobs of tf-plan.yml (plan + nested attest, all attempts, both successful), referencing
+  `tf-plan.yml` and `tf-attest.yml` and nothing outside deploy-workflows `@refs/heads/main`, made
+  from main's current head, newest successful plan run, started < 2 h ago;
+- the plan attestation: OIDC token minted by the nested `tf-attest.yml@main` job (no project
+  code) in that run, whose `aud` commits to the sha256 of the downloaded bundle and
+  `plan-summary.json` (Guardian F1);
 - the bundle: sha256 = approved value, only expected members, no links or traversal, complete
   `SHA256SUMS`, `SOURCE` = this commit, never overwrites a tracked file or writes through a symlink;
 - the plan file again: changes digest = the one Tobi approved, destroy gate (with the dispatched
@@ -135,7 +139,8 @@ Guardian's review of the first template (starhuntercrew `20d162e`) and how each 
 | 8 | Wildcard `PassRole`, account-wide CloudFront policy wildcards, ACM deletes | `PassRole` only on `role/<p>-lambda/*` to `lambda.amazonaws.com`; CloudFront update/delete only on the listed ids (create stays on the type: new ids are unknown); ACM delete/tag only with the project's tag, in the boundary too |
 | 9 | Bundle uploaded without a deploy role | Bundle (and its sha) produced only when `deploy_enabled` |
 | 10 | Unknown plan constructs | `action_invocations`, `deferred_changes`, incomplete plans and missing/null actions count as destructive |
-| F1 | A box-added job in the same `plan.yml` run (`needs: plan`, `actions: write`) can download `plan-bundle`, keep the genuine tfplan, swap a Lambda zip, re-tar with the right `SOURCE`, and re-upload `plan-bundle` + `plan-summary` with a matching `bundle_sha256` and any diff text; the changes digest (addresses + actions only) doesn't notice, Orion and tf-apply pass, AWS gets the malicious zip | **Plan attestation**: inside its own job tf-plan mints a GitHub OIDC token with `aud = deploy-workflows-plan:v1:<sha256(manifest)>`, the manifest holding the sha256 of the bundle and of the whole `plan-summary.json` (diff included). Only a job running `tf-plan.yml@refs/heads/main` gets that `job_workflow_ref`; a box-added job's token carries the project's own workflow ref. tf-apply verifies signature (GitHub JWKS), `iss`, `job_workflow_ref`, `repository`, `run_id`, `run_attempt`, `sha`, `ref`, `iat` inside the run, then recomputes both hashes from the downloaded artifacts (`scripts/attest.py`). Defence in depth: the plan run must have exactly one job (all attempts) and every referenced workflow must be deploy-workflows `@refs/heads/main`. Orion performs the same verification before showing a plan (second layer: what Tobi sees is attested too). Artifact attestations (Enterprise for private repos) and job outputs (not readable via the REST jobs API) weren't usable |
+| F1 | A box-added job in the same `plan.yml` run (`needs: plan`, `actions: write`) can download `plan-bundle`, keep the genuine tfplan, swap a Lambda zip, re-tar with the right `SOURCE`, and re-upload `plan-bundle` + `plan-summary` with a matching `bundle_sha256` and any diff text; the changes digest (addresses + actions only) doesn't notice, Orion and tf-apply pass, AWS gets the malicious zip | **Plan attestation**: a nested job from a separate file, `tf-attest.yml` (called only by tf-plan.yml, runs no project code), mints a GitHub OIDC token with `aud = deploy-workflows-plan:v2:<sha256(manifest)>`, the manifest holding the sha256 of the bundle and of the whole `plan-summary.json` (diff included). Only that job carries `job_workflow_ref = tf-attest.yml@refs/heads/main`; a box-added job's token carries the project's own workflow ref, and the plan job's carries `tf-plan.yml` (it runs project Terraform, so it must not be able to attest even if Terraform escaped). tf-apply verifies signature (GitHub JWKS), `iss`, `job_workflow_ref`, `repository`, `run_id`, `run_attempt`, `sha`, `ref`, `iat` inside the run, then recomputes both hashes from the downloaded artifacts (`scripts/attest.py`). A box-written `plan.yml` calling `tf-attest.yml` directly is refused because the run must consist of exactly tf-plan's two jobs, both successful, referencing both files. Defenc| F1b | (Guardian on f63cf2e, HIGH) The attestation token was minted in the job that runs project Terraform; with `id-token: write` every step there holds the OIDC request credentials, so Terraform reading `/proc/self/environ` (HCL `file()`) could mint tokens for any audience | (a) separate attest job (nested `tf-attest.yml`, no project code); (b) the token must carry `job_workflow_ref = tf-attest.yml@refs/heads/main`. Environments can't serve as the distinguishing claim: GitHub Free can't use environments in private repos; (c) Terraform runs as user `tfsandbox` (no sudo, no docker) with `env -i` (HOME, PATH, LANG, TF_*, AWS_REGION only), a copy of the checkout without `.git`, and a copy of the AWS profile; the runner's home is closed (0700) (`scripts/tf_sandbox.sh`, tested in a container by `tests/sandbox/run.sh`). Same in tf-apply. JWKS fetch refuses redirects; `kid` must be a non-empty string |
+e in depth: the plan run must have exactly those two jobs (all attempts) and every referenced workflow must be deploy-workflows `@refs/heads/main`. Orion performs the same verification before showing a plan (second layer: what Tobi sees is attested too). Artifact attestations (Enterprise for private repos) and job outputs (not readable via the REST jobs API) weren't usable |
 
 Further hardening in this version: plan attestation (F1), changes digest binding (what Tobi saw = what is applied),
 provider allowlist before `init`, provisioner/external-program refusal, plan run provenance
@@ -273,6 +278,7 @@ Not built yet; the module's trust and guardrails apply unchanged (boundary state
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
+tests/sandbox/run.sh          # needs docker: Terraform sandbox separation
 actionlint .github/workflows/*.yml
 terraform fmt -check -recursive modules
 (cd modules/github-oidc-roles && terraform init -backend=false && terraform validate && terraform test)
