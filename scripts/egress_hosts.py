@@ -5,9 +5,13 @@
 (`*.execute-api.*`), load balancers (`*.elb.*`), and more. So the proxy only relays to an EXACT
 list, derived here from workflow inputs, and refuses everything else.
 
-  egress_hosts.py --region R --state-bucket B [--state-region R2] --services "lambda dynamodb ..."
-                  [--global-hosts "iam.amazonaws.com cloudfront.amazonaws.com ..."]
-                  [--buckets "b1 b2"] [--s3-path-style] --out FILE
+  egress_hosts.py --policy-dir DIR/policy/egress --repository OWNER/REPO --expect-region R
+                  --expect-account ID [--expect-state-bucket B] --out FILE [--github-output FILE]
+
+The values come from the TRUSTED policy file policy/egress/<owner>/<repo>.json in
+deploy-workflows, selected by github.repository (run context). Caller inputs (from the
+box-writable plan.yml/deploy.yml) are only checked for agreement; they never add hosts. No file
+= refused. Outputs the trusted state bucket/region for the backend override.
 
 Produces (one per line):
   - sts.<region>.amazonaws.com (always: credentials/account checks)
@@ -25,6 +29,8 @@ elasticloadbalancing is fine (the API); global hosts that aren't `<name>.amazona
 or outside S3's naming rules; anything else malformed.
 """
 import argparse
+import json
+import os
 import re
 import sys
 
@@ -50,7 +56,7 @@ def build(region, state_bucket, services, global_hosts=(), buckets=(), state_reg
     if not REGION.match(state_region):
         raise HostError(f"bad state region {state_region!r}")
     if not services:
-        raise HostError("no egress services listed (egress_services is required): refusing")
+        raise HostError("the policy lists no egress services: refusing")
     hosts = {f"sts.{region}.amazonaws.com"}
     for svc in services:
         if not SERVICE.match(svc) or FORBIDDEN_SERVICE.match(svc):
@@ -72,26 +78,69 @@ def build(region, state_bucket, services, global_hosts=(), buckets=(), state_reg
     return sorted(hosts)
 
 
+POLICY_KEYS = {"schema", "repository", "account_id", "region", "state_bucket", "state_region", "services",
+               "global_hosts", "buckets", "s3_path_style"}
+REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def load_policy(policy_dir, repository):
+    """The trusted policy for `repository` (from the run context). Raises HostError if absent/bad."""
+    if not REPO.match(repository or "") or ".." in repository:
+        raise HostError(f"bad repository {repository!r}")
+    path = os.path.join(policy_dir, repository + ".json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            pol = json.load(f)
+    except FileNotFoundError:
+        raise HostError(f"no egress policy for {repository} in deploy-workflows (policy/egress/{repository}.json): "
+                        "onboarding is a PR to deploy-workflows")
+    except (OSError, ValueError) as e:
+        raise HostError(f"unreadable egress policy for {repository}: {e.__class__.__name__}")
+    if not isinstance(pol, dict) or set(pol) != POLICY_KEYS or pol.get("schema") != 1:
+        raise HostError("egress policy has unexpected fields or schema")
+    if pol["repository"] != repository:
+        raise HostError("egress policy is for another repository")
+    if not re.fullmatch(r"[0-9]{12}", str(pol["account_id"])):
+        raise HostError("egress policy account_id")
+    for k in ("services", "global_hosts", "buckets"):
+        if not isinstance(pol[k], list) or not all(isinstance(x, str) for x in pol[k]):
+            raise HostError(f"egress policy {k} must be a list of strings")
+    if not isinstance(pol["s3_path_style"], bool):
+        raise HostError("egress policy s3_path_style must be a boolean")
+    return pol
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--region", required=True)
-    ap.add_argument("--state-bucket", required=True)
-    ap.add_argument("--state-region", default="")
-    ap.add_argument("--services", default="")
-    ap.add_argument("--global-hosts", default="")
-    ap.add_argument("--buckets", default="")
-    ap.add_argument("--s3-path-style", action="store_true")
+    ap.add_argument("--policy-dir", required=True)
+    ap.add_argument("--repository", required=True, help="github.repository (run context)")
+    ap.add_argument("--expect-region", default="", help="caller input: must equal the policy's region")
+    ap.add_argument("--expect-state-bucket", default="", help="caller input: empty or equal to the policy's")
+    ap.add_argument("--expect-account", default="", help="caller input: must equal the policy's account")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--github-output", help="append state_bucket, state_region, region, account_id")
     args = ap.parse_args(argv)
     try:
-        hosts = build(args.region, args.state_bucket, words(args.services), words(args.global_hosts),
-                      words(args.buckets), args.state_region or None, args.s3_path_style)
+        pol = load_policy(args.policy_dir, args.repository)
+        # Caller inputs (box-writable) may only agree with the trusted policy, never extend it.
+        if args.expect_region != pol["region"]:
+            raise HostError(f"aws_region input {args.expect_region!r} differs from the trusted policy")
+        if args.expect_state_bucket and args.expect_state_bucket != pol["state_bucket"]:
+            raise HostError("state_bucket input differs from the trusted policy")
+        if args.expect_account != str(pol["account_id"]):
+            raise HostError("aws_account_id input differs from the trusted policy")
+        hosts = build(pol["region"], pol["state_bucket"], pol["services"], pol["global_hosts"],
+                      pol["buckets"], pol["state_region"], pol["s3_path_style"])
     except HostError as e:
-        print(f"::error::egress hosts: {e}", file=sys.stderr)
+        print(f"::error::egress policy: {e}", file=sys.stderr)
         return 1
     with open(args.out, "w", encoding="ascii") as f:
         f.write("\n".join(hosts) + "\n")
-    print(f"egress allowlist: {len(hosts)} AWS hosts (+ Terraform registry for init)")
+    if args.github_output:
+        with open(args.github_output, "a", encoding="ascii") as f:
+            f.write(f"state_bucket={pol['state_bucket']}\nstate_region={pol['state_region']}\n"
+                    f"region={pol['region']}\naccount_id={pol['account_id']}\n")
+    print(f"egress policy {args.repository}: {len(hosts)} AWS hosts (+ Terraform registry for init)")
     for h in hosts:
         print(f"  {h}")
     return 0

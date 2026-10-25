@@ -260,17 +260,74 @@ class EgressProxyRulesTest(unittest.TestCase):
             with self.assertRaises(self.eh.HostError, msg=kw):
                 self.shc_hosts(**kw)
 
-    def test_cli_and_hosts_file(self):
+    POLICY_DIR = str(ROOT / "policy" / "egress")
+
+    def policy_main(self, repo, region="eu-west-2", account="393686273578", bucket="", out=None, gh=None):
+        args = ["--policy-dir", self.POLICY_DIR, "--repository", repo, "--expect-region", region,
+                "--expect-account", account, "--expect-state-bucket", bucket, "--out", out or os.devnull]
+        if gh:
+            args += ["--github-output", gh]
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()) as err:
+            code = self.eh.main(args)
+        return code, err.getvalue()
+
+    def test_every_policy_file_is_valid(self):
+        files = sorted(Path(self.POLICY_DIR).glob("*/*.json"))
+        self.assertGreaterEqual(len(files), 2)
+        for f in files:
+            repo = f"{f.parent.name}/{f.stem}"
+            pol = self.eh.load_policy(self.POLICY_DIR, repo)
+            hosts = self.eh.build(pol["region"], pol["state_bucket"], pol["services"], pol["global_hosts"],
+                                  pol["buckets"], pol["state_region"], pol["s3_path_style"])
+            self.assertFalse(pol["s3_path_style"], repo)
+            self.assertFalse(any(h.startswith("s3.") for h in hosts), repo)
+
+    def test_policy_selected_by_repository_and_outputs_trusted_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            out, gh = os.path.join(d, "hosts"), os.path.join(d, "gh")
+            code, _ = self.policy_main("tobipjuk/incaseofemergency", account="147161676861", out=out, gh=gh)
+            self.assertEqual(code, 0)
+            hosts = self.ep.load_hosts(out)
+            self.assertIn("in-case-of-emergency-tfstate-20260924210003923500000001.s3.eu-west-2.amazonaws.com", hosts)
+            self.assertIn("ice-uploads-20260924223216864500000001.s3.eu-west-2.amazonaws.com", hosts)
+            self.assertNotIn("shc-site-393686273578-euw2.s3.eu-west-2.amazonaws.com", hosts)
+            outputs = dict(line.split("=", 1) for line in Path(gh).read_text().splitlines())
+            self.assertEqual(outputs["state_bucket"], "in-case-of-emergency-tfstate-20260924210003923500000001")
+            self.assertEqual(outputs["state_region"], "eu-west-2")
+
+    def test_repo_without_policy_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "hosts")
+            code, err = self.policy_main("tobipjuk/no-policy-repo", out=out)
+            self.assertEqual(code, 1)
+            self.assertIn("no egress policy", err)
+            self.assertFalse(os.path.exists(out))
+        for bad in ("tobipjuk/../etc/passwd", "../x/y", "tobipjuk", "a/b/c"):
+            self.assertEqual(self.policy_main(bad)[0], 1, bad)
+
+    def test_inputs_can_only_agree(self):
+        self.assertEqual(self.policy_main("tobipjuk/starhuntercrew")[0], 0)
+        self.assertEqual(self.policy_main("tobipjuk/starhuntercrew", bucket="shc-tfstate-393686273578-euw2")[0], 0)
+        self.assertEqual(self.policy_main("tobipjuk/starhuntercrew", bucket="attacker-state")[0], 1)
+        self.assertEqual(self.policy_main("tobipjuk/starhuntercrew", region="us-east-1")[0], 1)
+        self.assertEqual(self.policy_main("tobipjuk/starhuntercrew", account="111111111111")[0], 1)
+
+    def test_policy_file_shape_enforced(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "o"))
+            good = json.loads(Path(self.POLICY_DIR, "tobipjuk", "starhuntercrew.json").read_text())
+            for mutate in (lambda p: p.update(repository="o/other"), lambda p: p.update(extra=1),
+                           lambda p: p.update(s3_path_style="yes"), lambda p: p.update(buckets="b"),
+                           lambda p: p.update(schema=2), lambda p: p.update(account_id="x")):
+                pol = dict(good, repository="o/r")
+                mutate(pol)
+                Path(d, "o", "r.json").write_text(json.dumps(pol))
+                with self.assertRaises(self.eh.HostError):
+                    self.eh.load_policy(d, "o/r")
+
+    def test_hosts_file_parsing(self):
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "hosts.txt")
-            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-                self.assertEqual(self.eh.main(["--region", "eu-west-2", "--state-bucket", "b-state",
-                                               "--services", "lambda logs", "--out", out]), 0)
-                self.assertEqual(self.eh.main(["--region", "eu-west-2", "--state-bucket", "b-state",
-                                               "--out", out + "2"]), 1)
-            self.assertFalse(os.path.exists(out + "2"))
-            hosts = self.ep.load_hosts(out)
-            self.assertIn("b-state.s3.eu-west-2.amazonaws.com", hosts)
             Path(out).write_text("")
             with self.assertRaises(ValueError):
                 self.ep.load_hosts(out)

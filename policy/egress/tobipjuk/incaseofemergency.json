@@ -1,0 +1,12 @@
+{
+ "schema": 1,
+ "repository": "tobipjuk/incaseofemergency",
+ "account_id": "147161676861",
+ "region": "eu-west-2",
+ "state_bucket": "in-case-of-emergency-tfstate-20260924210003923500000001",
+ "state_region": "eu-west-2",
+ "services": ["lambda", "dynamodb", "logs", "sns", "monitoring", "apigateway", "email"],
+ "global_hosts": ["iam.amazonaws.com", "cloudfront.amazonaws.com", "route53.amazonaws.com"],
+ "buckets": ["ice-site-20260924210040541600000002", "ice-uploads-20260924223216864500000001"],
+ "s3_path_style": false
+}

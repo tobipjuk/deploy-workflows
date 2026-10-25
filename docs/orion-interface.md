@@ -317,6 +317,8 @@ Prerequisites in the project repo (its specialist and Tobi do these):
 3. Repo variables: `AWS_ACCOUNT_ID`, `AWS_PLAN_ROLE_ARN`, `AWS_DEPLOY_ROLE_ARN`,
    `TF_STATE_BUCKET`, `APPROVER_APP_SLUG`, plus project-specific ones (e.g. `APP_HOST`).
 4. `plan.yml` and `deploy.yml` calling the reusable workflows; one successful plan run.
+5. A trusted egress/state policy `policy/egress/<owner>/<repo>.json` in deploy-workflows (a PR
+   by Tobi). Without it every plan and deploy of the repo is refused.
 
 On the Orion side:
 

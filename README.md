@@ -38,6 +38,7 @@ Orion (server) polls plan runs ◄───────────────�
 | `scripts/check_plan_run.py` | Is this plan run deployable (main, newest, < 2 h, made by tf-plan.yml)? |
 | `scripts/check_lockfile.py` | Provider allowlist, checked before `terraform init` |
 | `policy/allowed-providers.txt` | Providers a deploy may use |
+| `policy/egress/<owner>/<repo>.json` | Per-repo trusted egress hosts, region, account, state bucket |
 | `modules/github-oidc-roles` | Terraform: plan + deploy roles, trust, boundaries, guardrails, data guard |
 | `docs/oidc-trust.md` | The OIDC sub template, exact subjects, the `gh api` call |
 | `docs/orion-interface.md` | The contract Orion's approver implements |
@@ -78,35 +79,48 @@ Orion (server) polls plan runs ◄───────────────�
 4. **Callers**: `.github/workflows/plan.yml` and `deploy.yml` (copy starhuntercrew's; inputs
    documented at the top of `tf-plan.yml` / `tf-apply.yml`). Keep them thin.
 5. **Orion**: register the repo (`docs/orion-interface.md` section 10).
+6. **Egress/state policy**: Tobi adds `policy/egress/<owner>/<repo>.json` here (see below).
 
-### Egress allowlist (per project, required)
+### Egress and state policy (per project, trusted, required)
 
-Terraform runs in a sandbox whose only way out is a proxy that relays to an **exact** host list
-(`scripts/egress_hosts.py`). Both callers pass the same inputs:
+Terraform runs in a sandbox whose only way out is a proxy that relays to an **exact** host list.
+That list, the region, the account and the state bucket come from a **trusted policy file in
+this repository**, `policy/egress/<owner>/<repo>.json`, selected by the run's
+`github.repository`, never by a workflow input: the project repo's `plan.yml` is writable by the
+box and runs without approval, so nothing in it may widen egress or redirect state.
 
-```yaml
-      state_bucket: ${{ vars.TF_STATE_BUCKET }}     # required: its virtual-hosted hosts are added
-      egress_services: >-                           # required: regional API endpoints
-        lambda dynamodb logs ssm sns events monitoring apigateway email
-      egress_global_hosts: >-                       # global / us-east-1 endpoints the code calls
-        iam.amazonaws.com cloudfront.amazonaws.com route53.amazonaws.com
-        acm.us-east-1.amazonaws.com sts.us-east-1.amazonaws.com
-      egress_buckets: >-                            # the project's own buckets (dot-free names)
-        my-site-bucket my-backups-bucket
-      # egress_s3_path_style: true                  # only if a plan needs s3.<region>.amazonaws.com
-      # state_region: us-east-1                     # only if the state bucket is elsewhere
+```json
+{
+ "schema": 1,
+ "repository": "tobipjuk/<repo>",
+ "account_id": "<12 digits>",
+ "region": "eu-west-2",
+ "state_bucket": "<state bucket>",
+ "state_region": "eu-west-2",
+ "services": ["lambda", "dynamodb", "logs", "ssm", "sns", "events", "monitoring", "apigateway", "email"],
+ "global_hosts": ["iam.amazonaws.com", "cloudfront.amazonaws.com", "route53.amazonaws.com"],
+ "buckets": ["<own bucket>", "<own bucket>"],
+ "s3_path_style": false
+}
 ```
 
-How to fill it: one regional service name per AWS service in the Terraform code (the endpoint
-prefix: `apigateway` for API Gateway v1/v2, `email` for SES v1, `monitoring` for CloudWatch
-alarms, `events` for EventBridge, `logs`, `lambda`, `dynamodb`, `ssm`, `sns`, `sqs`, `kms`...);
-global ones as hosts (`iam.amazonaws.com`, `cloudfront.amazonaws.com`, `route53.amazonaws.com`,
-`budgets.amazonaws.com`); anything in a second region (an `aws.us_east_1` alias for ACM) as
-`<service>.<region>.amazonaws.com`, including that region's `sts`. Every bucket the code
-manages or reads goes in `egress_buckets`. `sts.<aws_region>` and the state bucket are added
-automatically. Refused on purpose: `s3*` service names, `execute-api`, `elb*`, dotted bucket
-names, wildcards. A missing host shows up as a failed plan and a non-zero "refused" count in
-the "Sandbox egress" step (hostnames are never logged): add the endpoint and push again.
+- `services`: one regional endpoint name per AWS service the Terraform code calls (`apigateway`
+  for API Gateway v1/v2, `email` for SES v1, `monitoring` for CloudWatch alarms, `events`,
+  `logs`, `lambda`, `dynamodb`, `ssm`, `sns`, `sqs`, `kms` ...). `sts.<region>` is always added.
+- `global_hosts`: global endpoints (`iam`, `cloudfront`, `route53`, `budgets` `.amazonaws.com`)
+  and anything in a second region, e.g. an `aws.us_east_1` alias: `acm.us-east-1.amazonaws.com`
+  and `sts.us-east-1.amazonaws.com`.
+- `buckets`: every bucket the code manages or reads (dot-free names); the state bucket is added.
+- `s3_path_style`: keep false. The path-style host serves every bucket, attacker-owned ones too.
+
+The pipeline refuses a repo without a file, a file for another repository, unknown fields,
+`s3*`/`execute-api`/`elb*` services, dotted buckets and wildcards (`scripts/egress_hosts.py`).
+Caller inputs `aws_region`, `aws_account_id` and the optional `state_bucket` must **agree** with
+the file; the backend always uses the file's bucket and region (`-backend-config`).
+
+**Onboarding a repo = a pull request to deploy-workflows, made and merged by Tobi**, adding its
+policy file. A missing endpoint shows up as a failed plan and a non-zero "refused" count in the
+"Sandbox egress" step (hostnames are never logged): extend the file in another PR.
 
 Requirements on the project's Terraform:
 
@@ -175,7 +189,8 @@ Guardian's review of the first template (starhuntercrew `20d162e`) and how each 
 | 10 | Unknown plan constructs | `action_invocations`, `deferred_changes`, incomplete plans and missing/null actions count as destructive |
 | F1 | A box-added job in the same `plan.yml` run (`needs: plan`, `actions: write`) can download `plan-bundle`, keep the genuine tfplan, swap a Lambda zip, re-tar with the right `SOURCE`, and re-upload `plan-bundle` + `plan-summary` with a matching `bundle_sha256` and any diff text; the changes digest (addresses + actions only) doesn't notice, Orion and tf-apply pass, AWS gets the malicious zip | **Plan attestation**: a nested job from a separate file, `tf-attest.yml` (called only by tf-plan.yml, runs no project code), mints a GitHub OIDC token with `aud = deploy-workflows-plan:v2:<sha256(manifest)>`, the manifest holding the sha256 of the bundle and of the whole `plan-summary.json` (diff included). Only that job carries `job_workflow_ref = tf-attest.yml@refs/heads/main`; a box-added job's token carries the project's own workflow ref, and the plan job's carries `tf-plan.yml` (it runs project Terraform, so it must not be able to attest even if Terraform escaped). tf-apply verifies signature (GitHub JWKS), `iss`, `job_workflow_ref`, `repository`, `run_id`, `run_attempt`, `sha`, `ref`, `iat` inside the run, then recomputes both hashes from the downloaded artifacts (`scripts/attest.py`). A box-written `plan.yml` calling `tf-attest.yml` directly is refused because the run must consist of exactly tf-plan's two jobs, both successful, referencing both files. Defenc| F1b | (Guardian on f63cf2e, HIGH) The attestation token was minted in the job that runs project Terraform; with `id-token: write` every step there holds the OIDC request credentials, so Terraform reading `/proc/self/environ` (HCL `file()`) could mint tokens for any audience | (a) separate attest job (nested `tf-attest.yml`, no project code); (b) the token must carry `job_workflow_ref = tf-attest.yml@refs/heads/main`. Environments can't serve as the distinguishing claim: GitHub Free can't use environments in private repos; (c) Terraform runs as user `tfsandbox` (no sudo, no docker) with `env -i` (HOME, PATH, LANG, TF_*, AWS_REGION only), a copy of the checkout without `.git`, and a copy of the AWS profile; the runner's home is closed (0700) (`scripts/tf_sandbox.sh`, tested in a container by `tests/sandbox/run.sh`). Same in tf-apply. JWKS fetch refuses redirects; `kid` must be a non-empty string |
 | M2 | (Guardian, ICE review) The plan role runs on every push without approval and can read secrets (state, Lambda env). The allowlisted aws provider/S3 backend accept `endpoints {}`, proxies, `custom_ca_bundle`, `shared_config_files` (`credential_process`), `assume_role`, `skip_*` ...: an aliased provider whose endpoint URL carries a secret leaks it during plan | (1) **static pre-plan gate** `scripts/check_tf_config.py` (tf-plan and tf-apply, before init): allowlists, not denylists, for provider blocks (aws: alias, region, profile, allowed/forbidden_account_ids, max_retries, retry_mode, default_tags.tags, ignore_tags; archive/random: alias), `terraform {}` (required_version, required_providers, backend), backends (s3 basics, local path), profile = the pipeline's profile or `var.x`, module sources local only; root and every local module, HCL and JSON syntax, unparseable = refused. Terraform can't set env vars and runs under `env -i`. (2) **egress allowlist**: the sandbox uid may only reach a local CONNECT proxy (iptables/ip6tables owner match, no DNS, no IMDS); the proxy relays :443 to `*.amazonaws.com`, `registry.terraform.io`, `releases.hashicorp.com` only, refuses non-global addresses, logs counts not names. (3) **needs-attention list** in the summary and `plan-summary.json`: API integration targets, CloudFront origins, Lambda permissions and function URL auth, trust/IAM policies, DNS records, SNS subscriptions, Lambda env changes, S3 bucket-config resources, shown first in Telegram; digest binding unchanged |
-| M2b | (Guardian on ca85a7d) HIGH: `data "terraform_remote_state"` takes a backend `config` map (endpoint overrides) and passed the gate. MEDIUM: `*.amazonaws.com` includes attacker-ownable hosts (virtual-hosted buckets, `*.execute-api.*`, `*.elb.*`). LOW: setup trusted any listener on the proxy port; attention values could carry secrets in URLs, record values, policy docs | Built-in data/resource types other than `terraform_data` (so `terraform_remote_state`) refused, HCL and JSON. Exact per-project host list from workflow inputs (`egress_services`, `egress_global_hosts`, `egress_buckets`, state bucket; path-style S3 opt-in), fail closed when unset; the proxy is always started by setup, must bind, and proves itself with a pid ready-file. Attention and redacted diff: URLs lose userinfo/query/fragment, DNS record values, policy documents and env vars never shown, sensitivity masks win; tests assert a secret never appears |
+| M2b | (Guardian on ca85a7d) HIGH: `data "terraform_remote_state"` takes a backend `config` map (endpoint overrides) and passed the gate. MEDIUM: `*.amazonaws.com` includes attacker-ownable hosts (virtual-hosted buckets, `*.execute-api.*`, `*.elb.*`). LOW: setup trusted any listener on the proxy port; attention values could carry secrets in URLs, record values, policy docs | Built-in data/resource types other than `terraform_data` (so `terraform_remote_state`) refused, HCL and JSON. Exact per-project host list (first from workflow inputs, superseded by M2c: trusted policy files), path-style S3 opt-in, fail closed when unset; the proxy is always started by setup, must bind, and proves itself with a pid ready-file. Attention and redacted diff: URLs lose userinfo/query/fragment, DNS record values, policy documents and env vars never shown, sensitivity masks win; tests assert a secret never appears |
+| M2c | (Guardian on bdc9c83) The egress list and state bucket came from caller inputs in the box-writable `plan.yml`, which runs on every push: the box could add its own bucket or turn path-style on | Trusted `policy/egress/<owner>/<repo>.json` here, keyed by `github.repository`; missing file = refused; region, account and state bucket from the file (backend override uses them), caller inputs may only agree; the `egress_*` inputs are gone, so callers don't change |
 e in depth: the plan run must have exactly those two jobs (all attempts) and every referenced workflow must be deploy-workflows `@refs/heads/main`. Orion performs the same verification before showing a plan (second layer: what Tobi sees is attested too). Artifact attestations (Enterprise for private repos) and job outputs (not readable via the REST jobs API) weren't usable |
 
 Further hardening in this version: plan attestation (F1), changes digest binding (what Tobi saw = what is applied),

@@ -43,29 +43,7 @@ on:
         type: string
         required: true
       state_bucket:
-        type: string
-        default: ""
-      egress_services:
-        description: >-
-          Required. Regional AWS API endpoint names the Terraform code calls, space/newline separated
-          (e.g. "lambda dynamodb logs ssm sns events monitoring apigateway email"); each becomes
-          <name>.<aws_region>.amazonaws.com. Not s3*/execute-api/elb (see scripts/egress_hosts.py).
-        type: string
-        required: true
-      egress_global_hosts:
-        description: Exact global/us-east-1 API hosts (e.g. "iam.amazonaws.com cloudfront.amazonaws.com route53.amazonaws.com acm.us-east-1.amazonaws.com")
-        type: string
-        default: ""
-      egress_buckets:
-        description: The project's own S3 buckets Terraform reads/writes (virtual-hosted hosts are allowed for these and the state bucket only)
-        type: string
-        default: ""
-      egress_s3_path_style:
-        description: Also allow s3.<region>.amazonaws.com (serves every bucket, attacker-owned ones too). Leave false unless a plan needs it.
-        type: boolean
-        default: false
-      state_region:
-        description: Region of the state bucket if not aws_region
+        description: Optional; if set it must equal the trusted policy's state bucket (the backend always uses the policy's)
         type: string
         default: ""
       terraform_version:
@@ -304,24 +282,22 @@ jobs:
       # Project Terraform (and its providers) run as user tfsandbox with a scrubbed environment:
       # no OIDC request credentials, runtime token or runner files (scripts/tf_sandbox.sh). The
       # sandbox gets the verified checkout, the verified tfplan and build files, and the profile.
-      - name: Egress allowlist for the sandbox
+      # Trusted per-repo policy (deploy-workflows policy/egress/<owner>/<repo>.json), chosen by the
+      # run's repository, never by an input: region, account, state bucket and the exact egress
+      # hosts. Caller inputs may only agree with it. No file = refused.
+      - name: Egress and state policy (trusted, per repository)
+        id: egress
         env:
           TOOLS: ${{ steps.tools.outputs.dir }}
-          REGION: ${{ inputs.aws_region }}
-          STATE_BUCKET: ${{ inputs.state_bucket }}
-          STATE_REGION: ${{ inputs.state_region }}
-          SERVICES: ${{ inputs.egress_services }}
-          GLOBAL_HOSTS: ${{ inputs.egress_global_hosts }}
-          BUCKETS: ${{ inputs.egress_buckets }}
-          PATH_STYLE: ${{ inputs.egress_s3_path_style }}
+          REGION_INPUT: ${{ inputs.aws_region }}
+          ACCOUNT_INPUT: ${{ inputs.aws_account_id }}
+          STATE_BUCKET_INPUT: ${{ inputs.state_bucket }}
         run: |
           set -euo pipefail
-          [ -n "$STATE_BUCKET" ] || { echo "::error::state_bucket is required (egress allowlist)"; exit 1; }
-          args=(--region "$REGION" --state-bucket "$STATE_BUCKET" --state-region "$STATE_REGION"
-                --services "$SERVICES" --global-hosts "$GLOBAL_HOSTS" --buckets "$BUCKETS"
-                --out "$RUNNER_TEMP/egress-hosts.txt")
-          [ "$PATH_STYLE" != "true" ] || args+=(--s3-path-style)
-          python3 -I "$TOOLS/scripts/egress_hosts.py" "${args[@]}"
+          python3 -I "$TOOLS/scripts/egress_hosts.py" --policy-dir "$TOOLS/policy/egress" \
+            --repository "$GITHUB_REPOSITORY" --expect-region "$REGION_INPUT" \
+            --expect-account "$ACCOUNT_INPUT" --expect-state-bucket "$STATE_BUCKET_INPUT" \
+            --out "$RUNNER_TEMP/egress-hosts.txt" --github-output "$GITHUB_OUTPUT"
 
       - name: Set up the Terraform sandbox
         env:
@@ -332,12 +308,14 @@ jobs:
       - name: terraform init (sandbox)
         env:
           TOOLS: ${{ steps.tools.outputs.dir }}
-          STATE_BUCKET: ${{ inputs.state_bucket }}
+          # From the trusted policy, not from the caller: plans/applies only ever touch that state.
+          STATE_BUCKET: ${{ steps.egress.outputs.state_bucket }}
+          STATE_REGION: ${{ steps.egress.outputs.state_region }}
           AWS_REGION: ${{ inputs.aws_region }}
         run: |
           set -euo pipefail
-          args=(-input=false -lockfile=readonly)
-          [ -z "$STATE_BUCKET" ] || args+=("-backend-config=bucket=${STATE_BUCKET}")
+          [ -n "$STATE_BUCKET" ] && [ -n "$STATE_REGION" ] || { echo "::error::no trusted state bucket"; exit 1; }
+          args=(-input=false -lockfile=readonly "-backend-config=bucket=${STATE_BUCKET}" "-backend-config=region=${STATE_REGION}")
           bash "$TOOLS/scripts/tf_sandbox.sh" run "$TF_DIR" init "${args[@]}"
 
       # Recomputed from the plan file itself: the digest must equal the one Tobi approved,
