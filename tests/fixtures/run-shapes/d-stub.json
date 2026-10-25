@@ -1,0 +1,47 @@
+{
+ "description": "tf-attest.yml called directly, nothing else",
+ "expect": "refuse",
+ "jobs": {
+  "jobs": [
+   {
+    "conclusion": "success",
+    "head_branch": "main",
+    "name": "P / attest plan artifacts",
+    "run_attempt": 1,
+    "status": "completed",
+    "workflow_name": "Plan"
+   }
+  ],
+  "total_count": 1
+ },
+ "observed": "2026-10-25, github.com, private repo on GitHub Free (tobipjuk/dw-shape-test, deleted after)",
+ "reusable": "tobipjuk/dw-shape-test/.github/workflows/tf-plan.yml",
+ "run": {
+  "conclusion": "success",
+  "created_at": "2026-10-25T10:42:45Z",
+  "event": "push",
+  "head_branch": "main",
+  "head_repository": {
+   "full_name": "tobipjuk/dw-shape-test"
+  },
+  "head_sha": "5a1be818b3ebe47ad9907ae9d86488c50f6204f3",
+  "id": 40185895668,
+  "name": "Plan",
+  "path": ".github/workflows/plan.yml",
+  "referenced_workflows": [
+   {
+    "path": "tobipjuk/dw-shape-test/.github/workflows/tf-attest.yml@main",
+    "ref": "refs/heads/main",
+    "sha": "5a1be818b3ebe47ad9907ae9d86488c50f6204f3"
+   }
+  ],
+  "repository": {
+   "full_name": "tobipjuk/dw-shape-test"
+  },
+  "run_attempt": 1,
+  "run_started_at": "2026-10-25T10:42:45Z",
+  "status": "completed",
+  "updated_at": "2026-10-25T10:42:54Z"
+ },
+ "variant": "d-stub"
+}

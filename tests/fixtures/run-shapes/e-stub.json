@@ -1,0 +1,76 @@
+{
+ "description": "tf-plan.yml called twice",
+ "expect": "refuse",
+ "jobs": {
+  "jobs": [
+   {
+    "conclusion": "success",
+    "head_branch": "main",
+    "name": "plan2 / terraform plan",
+    "run_attempt": 1,
+    "status": "completed",
+    "workflow_name": "Plan"
+   },
+   {
+    "conclusion": "success",
+    "head_branch": "main",
+    "name": "plan / terraform plan",
+    "run_attempt": 1,
+    "status": "completed",
+    "workflow_name": "Plan"
+   },
+   {
+    "conclusion": "success",
+    "head_branch": "main",
+    "name": "plan2 / attest / attest plan artifacts",
+    "run_attempt": 1,
+    "status": "completed",
+    "workflow_name": "Plan"
+   },
+   {
+    "conclusion": "success",
+    "head_branch": "main",
+    "name": "plan / attest / attest plan artifacts",
+    "run_attempt": 1,
+    "status": "completed",
+    "workflow_name": "Plan"
+   }
+  ],
+  "total_count": 4
+ },
+ "observed": "2026-10-25, github.com, private repo on GitHub Free (tobipjuk/dw-shape-test, deleted after)",
+ "reusable": "tobipjuk/dw-shape-test/.github/workflows/tf-plan.yml",
+ "run": {
+  "conclusion": "success",
+  "created_at": "2026-10-25T10:43:07Z",
+  "event": "push",
+  "head_branch": "main",
+  "head_repository": {
+   "full_name": "tobipjuk/dw-shape-test"
+  },
+  "head_sha": "4f10645e2b8ad5785fa9f420bac5fa9c68f3bb65",
+  "id": 40185919063,
+  "name": "Plan",
+  "path": ".github/workflows/plan.yml",
+  "referenced_workflows": [
+   {
+    "path": "tobipjuk/dw-shape-test/.github/workflows/tf-plan.yml@main",
+    "ref": "refs/heads/main",
+    "sha": "4f10645e2b8ad5785fa9f420bac5fa9c68f3bb65"
+   },
+   {
+    "path": "tobipjuk/dw-shape-test/.github/workflows/tf-attest.yml@main",
+    "ref": "refs/heads/main",
+    "sha": "4f10645e2b8ad5785fa9f420bac5fa9c68f3bb65"
+   }
+  ],
+  "repository": {
+   "full_name": "tobipjuk/dw-shape-test"
+  },
+  "run_attempt": 1,
+  "run_started_at": "2026-10-25T10:43:07Z",
+  "status": "completed",
+  "updated_at": "2026-10-25T10:43:22Z"
+ },
+ "variant": "e-stub"
+}

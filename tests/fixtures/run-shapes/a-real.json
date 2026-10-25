@@ -1,0 +1,60 @@
+{
+ "description": "honest call of the real deploy-workflows tf-plan.yml without an AWS role: plan job fails, nested attest call skipped (shows as 'plan / attest')",
+ "expect": "refuse",
+ "jobs": {
+  "jobs": [
+   {
+    "conclusion": "failure",
+    "head_branch": "main",
+    "name": "plan / terraform plan",
+    "run_attempt": 1,
+    "status": "completed",
+    "workflow_name": "Plan"
+   },
+   {
+    "conclusion": "skipped",
+    "head_branch": "main",
+    "name": "plan / attest",
+    "run_attempt": 1,
+    "status": "completed",
+    "workflow_name": "Plan"
+   }
+  ],
+  "total_count": 2
+ },
+ "observed": "2026-10-25, github.com, private repo on GitHub Free (tobipjuk/dw-shape-test, deleted after)",
+ "reusable": "tobipjuk/deploy-workflows/.github/workflows/tf-plan.yml",
+ "run": {
+  "conclusion": "failure",
+  "created_at": "2026-10-25T10:45:36Z",
+  "event": "push",
+  "head_branch": "main",
+  "head_repository": {
+   "full_name": "tobipjuk/dw-shape-test"
+  },
+  "head_sha": "514866d2def72f5238ec60b3fb641c2ecb6edbc2",
+  "id": 40186090732,
+  "name": "Plan",
+  "path": ".github/workflows/plan.yml",
+  "referenced_workflows": [
+   {
+    "path": "tobipjuk/deploy-workflows/.github/workflows/tf-plan.yml@main",
+    "ref": "refs/heads/main",
+    "sha": "87b5c8e793b3c6e8a248748e7814e1510a11e991"
+   },
+   {
+    "path": "tobipjuk/deploy-workflows/.github/workflows/tf-attest.yml@main",
+    "ref": "refs/heads/main",
+    "sha": "87b5c8e793b3c6e8a248748e7814e1510a11e991"
+   }
+  ],
+  "repository": {
+   "full_name": "tobipjuk/dw-shape-test"
+  },
+  "run_attempt": 1,
+  "run_started_at": "2026-10-25T10:45:36Z",
+  "status": "completed",
+  "updated_at": "2026-10-25T10:45:50Z"
+ },
+ "variant": "a-real"
+}

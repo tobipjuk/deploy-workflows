@@ -1,0 +1,76 @@
+{
+ "description": "re-run of a-stub (attempt 2): jobs over all attempts = 4",
+ "expect": "refuse",
+ "jobs": {
+  "jobs": [
+   {
+    "conclusion": "success",
+    "head_branch": "main",
+    "name": "plan / terraform plan",
+    "run_attempt": 1,
+    "status": "completed",
+    "workflow_name": "Plan"
+   },
+   {
+    "conclusion": "success",
+    "head_branch": "main",
+    "name": "plan / attest / attest plan artifacts",
+    "run_attempt": 1,
+    "status": "completed",
+    "workflow_name": "Plan"
+   },
+   {
+    "conclusion": "success",
+    "head_branch": "main",
+    "name": "plan / terraform plan",
+    "run_attempt": 2,
+    "status": "completed",
+    "workflow_name": "Plan"
+   },
+   {
+    "conclusion": "success",
+    "head_branch": "main",
+    "name": "plan / attest / attest plan artifacts",
+    "run_attempt": 2,
+    "status": "completed",
+    "workflow_name": "Plan"
+   }
+  ],
+  "total_count": 4
+ },
+ "observed": "2026-10-25, github.com, private repo on GitHub Free (tobipjuk/dw-shape-test, deleted after)",
+ "reusable": "tobipjuk/dw-shape-test/.github/workflows/tf-plan.yml",
+ "run": {
+  "conclusion": "success",
+  "created_at": "2026-10-25T10:40:14Z",
+  "event": "push",
+  "head_branch": "main",
+  "head_repository": {
+   "full_name": "tobipjuk/dw-shape-test"
+  },
+  "head_sha": "15a563df7b7a72ed3cb724aff98ca89c349b0b64",
+  "id": 40185722534,
+  "name": "Plan",
+  "path": ".github/workflows/plan.yml",
+  "referenced_workflows": [
+   {
+    "path": "tobipjuk/dw-shape-test/.github/workflows/tf-attest.yml@main",
+    "ref": "refs/heads/main",
+    "sha": "15a563df7b7a72ed3cb724aff98ca89c349b0b64"
+   },
+   {
+    "path": "tobipjuk/dw-shape-test/.github/workflows/tf-plan.yml@main",
+    "ref": "refs/heads/main",
+    "sha": "15a563df7b7a72ed3cb724aff98ca89c349b0b64"
+   }
+  ],
+  "repository": {
+   "full_name": "tobipjuk/dw-shape-test"
+  },
+  "run_attempt": 2,
+  "run_started_at": "2026-10-25T10:40:44Z",
+  "status": "completed",
+  "updated_at": "2026-10-25T10:41:01Z"
+ },
+ "variant": "f-rerun"
+}

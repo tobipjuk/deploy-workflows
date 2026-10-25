@@ -1,0 +1,68 @@
+{
+ "description": "plain job 'P / terraform plan' + job P calling tf-attest.yml directly + tf-plan.yml call with if: false",
+ "expect": "refuse",
+ "jobs": {
+  "jobs": [
+   {
+    "conclusion": "success",
+    "head_branch": "main",
+    "name": "P / terraform plan",
+    "run_attempt": 1,
+    "status": "completed",
+    "workflow_name": "Plan"
+   },
+   {
+    "conclusion": "skipped",
+    "head_branch": "main",
+    "name": "plan",
+    "run_attempt": 1,
+    "status": "completed",
+    "workflow_name": "Plan"
+   },
+   {
+    "conclusion": "success",
+    "head_branch": "main",
+    "name": "P / attest plan artifacts",
+    "run_attempt": 1,
+    "status": "completed",
+    "workflow_name": "Plan"
+   }
+  ],
+  "total_count": 3
+ },
+ "observed": "2026-10-25, github.com, private repo on GitHub Free (tobipjuk/dw-shape-test, deleted after)",
+ "reusable": "tobipjuk/dw-shape-test/.github/workflows/tf-plan.yml",
+ "run": {
+  "conclusion": "success",
+  "created_at": "2026-10-25T10:41:45Z",
+  "event": "push",
+  "head_branch": "main",
+  "head_repository": {
+   "full_name": "tobipjuk/dw-shape-test"
+  },
+  "head_sha": "065a7db57ba8c7884d6343a61c8657c25ee73e6e",
+  "id": 40185826388,
+  "name": "Plan",
+  "path": ".github/workflows/plan.yml",
+  "referenced_workflows": [
+   {
+    "path": "tobipjuk/dw-shape-test/.github/workflows/tf-attest.yml@main",
+    "ref": "refs/heads/main",
+    "sha": "065a7db57ba8c7884d6343a61c8657c25ee73e6e"
+   },
+   {
+    "path": "tobipjuk/dw-shape-test/.github/workflows/tf-plan.yml@main",
+    "ref": "refs/heads/main",
+    "sha": "065a7db57ba8c7884d6343a61c8657c25ee73e6e"
+   }
+  ],
+  "repository": {
+   "full_name": "tobipjuk/dw-shape-test"
+  },
+  "run_attempt": 1,
+  "run_started_at": "2026-10-25T10:41:45Z",
+  "status": "completed",
+  "updated_at": "2026-10-25T10:41:57Z"
+ },
+ "variant": "c-stub"
+}

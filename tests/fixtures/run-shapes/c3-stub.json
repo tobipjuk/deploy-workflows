@@ -1,0 +1,60 @@
+{
+ "description": "c2 + tf-plan referenced through an empty matrix (fromJSON('[]')): 2 successful jobs, both suffixes, BOTH workflows referenced; only the run's conclusion (failure) catches it",
+ "expect": "refuse",
+ "jobs": {
+  "jobs": [
+   {
+    "conclusion": "success",
+    "head_branch": "main",
+    "name": "P / terraform plan",
+    "run_attempt": 1,
+    "status": "completed",
+    "workflow_name": "Plan"
+   },
+   {
+    "conclusion": "success",
+    "head_branch": "main",
+    "name": "P / attest / attest plan artifacts",
+    "run_attempt": 1,
+    "status": "completed",
+    "workflow_name": "Plan"
+   }
+  ],
+  "total_count": 2
+ },
+ "observed": "2026-10-25, github.com, private repo on GitHub Free (tobipjuk/dw-shape-test, deleted after)",
+ "reusable": "tobipjuk/dw-shape-test/.github/workflows/tf-plan.yml",
+ "run": {
+  "conclusion": "failure",
+  "created_at": "2026-10-25T10:43:52Z",
+  "event": "push",
+  "head_branch": "main",
+  "head_repository": {
+   "full_name": "tobipjuk/dw-shape-test"
+  },
+  "head_sha": "d0a082950844df0c65d0f04ff85b0b1a97aebbaa",
+  "id": 40185969119,
+  "name": "Plan",
+  "path": ".github/workflows/plan.yml",
+  "referenced_workflows": [
+   {
+    "path": "tobipjuk/dw-shape-test/.github/workflows/tf-attest.yml@main",
+    "ref": "refs/heads/main",
+    "sha": "d0a082950844df0c65d0f04ff85b0b1a97aebbaa"
+   },
+   {
+    "path": "tobipjuk/dw-shape-test/.github/workflows/tf-plan.yml@main",
+    "ref": "refs/heads/main",
+    "sha": "d0a082950844df0c65d0f04ff85b0b1a97aebbaa"
+   }
+  ],
+  "repository": {
+   "full_name": "tobipjuk/dw-shape-test"
+  },
+  "run_attempt": 1,
+  "run_started_at": "2026-10-25T10:43:52Z",
+  "status": "completed",
+  "updated_at": "2026-10-25T10:44:08Z"
+ },
+ "variant": "c3-stub"
+}
