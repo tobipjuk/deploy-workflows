@@ -151,21 +151,60 @@ jobs:
         id: tools
         uses: tobipjuk/deploy-workflows/.github/actions/tools@main
 
-      - name: Check the plan run (main, newest, < 2 h, made by tf-plan.yml)
+      - name: Check the plan run (main, newest, < 2 h, one job, made by tf-plan.yml)
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TOOLS: ${{ steps.tools.outputs.dir }}
         run: |
           set -euo pipefail
           python3 -I "$TOOLS/scripts/check_plan_run.py" --repo "$GITHUB_REPOSITORY" \
-            --run-id "$PLAN_RUN_ID" --expected-sha "$GITHUB_SHA" --max-age-seconds 7200
+            --run-id "$PLAN_RUN_ID" --expected-sha "$GITHUB_SHA" --max-age-seconds 7200 \
+            --facts-out "$RUNNER_TEMP/plan-run.json"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: plan-bundle
-          path: ${{ runner.temp }}/download
+          path: ${{ runner.temp }}/download/bundle
           run-id: ${{ github.event.inputs.plan_run_id }}
           github-token: ${{ github.token }}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plan-summary
+          path: ${{ runner.temp }}/download/summary
+          run-id: ${{ github.event.inputs.plan_run_id }}
+          github-token: ${{ github.token }}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plan-attestation
+          path: ${{ runner.temp }}/download/attestation
+          run-id: ${{ github.event.inputs.plan_run_id }}
+          github-token: ${{ github.token }}
+
+      # Guardian F1: the artifacts must be the ones tf-plan.yml@main produced in that run.
+      # Verifies the OIDC token (GitHub JWKS signature, iss, job_workflow_ref tf-plan.yml@main,
+      # repository, run_id, run_attempt, sha, iat inside the run) and that its aud commits to
+      # the sha256 of the downloaded bundle and plan-summary.json; the bundle is the approved
+      # one and the summary's digest is the approved digest.
+      - name: Verify the plan attestation
+        env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/download"
+          facts="$RUNNER_TEMP/plan-run.json"
+          attempt=$(python3 -Ic 'import json,sys; print(int(json.load(open(sys.argv[1]))["run_attempt"]))' "$facts")
+          started=$(python3 -Ic 'import json,sys; print(json.load(open(sys.argv[1]))["run_started_at"])' "$facts")
+          updated=$(python3 -Ic 'import json,sys; print(json.load(open(sys.argv[1]))["updated_at"])' "$facts")
+          python3 -I "$TOOLS/scripts/attest.py" verify \
+            --token "$d/attestation/token.jwt" --manifest "$d/attestation/manifest.json" \
+            --jwks-url https://token.actions.githubusercontent.com/.well-known/jwks \
+            --bundle "$d/bundle/plan-bundle.tar" --summary "$d/summary/plan-summary.json" \
+            --repo "$GITHUB_REPOSITORY" --run-id "$PLAN_RUN_ID" --run-attempt "$attempt" \
+            --sha "$GITHUB_SHA" --not-before "$started" --not-after "$updated" \
+            --expect-bundle-sha256 "$BUNDLE_SHA256" --expect-digest "$CHANGES_DIGEST"
+          echo "Plan attestation verified (tf-plan.yml@main, run $PLAN_RUN_ID attempt $attempt)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify the plan bundle and put it in place
         env:
@@ -179,7 +218,7 @@ jobs:
             [ -z "$g" ] || args+=(--glob "$g")
           done <<< "$GLOBS"
           python3 -I "$TOOLS/scripts/bundle.py" verify --root "$GITHUB_WORKSPACE" \
-            --tar "$RUNNER_TEMP/download/plan-bundle.tar" --sha256 "$BUNDLE_SHA256" \
+            --tar "$RUNNER_TEMP/download/bundle/plan-bundle.tar" --sha256 "$BUNDLE_SHA256" \
             --source "$GITHUB_SHA" --tfplan-dest "$TF_DIR/tfplan" "${args[@]}"
           rm -rf "$RUNNER_TEMP/download"
           # Tracked files must still be exactly the commit.

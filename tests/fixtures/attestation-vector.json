@@ -1,0 +1,35 @@
+{
+ "description": "Plan attestation test vector (throwaway key; see docs/orion-interface.md 4a).",
+ "jwks": {
+  "keys": [
+   {
+    "kty": "RSA",
+    "alg": "RS256",
+    "use": "sig",
+    "kid": "test-key-1",
+    "n": "o7R9Cs9RJAKveFK3m_ZzNcrHzSFdHKnNtuB5CHb5qfrHL0xd1OmtBqunSVL3j5Keh4dkpa7O2gKynL0TaXqwmguYceu3-uMe2HXuLZp_moPs3BhsTNlwpGC1kC7Ud21nJmO23tCwTafKumiVCQk3PH5EV7RjokTcJJdRDZS4b2EFk30ySaxfpRd_xB9aqqC5h84_-TeaNHNRaf34a2dmLq0CHG5AxIoSPuyZemqUijEiI7xTtW8e2xAfpIutL-D3ww9IdTVpbkKuRc9_n7wD6kINHOZOMPX26_I5ipRQ2IPvcGtAJSjI2suKt0PIgARBWtQb8i4j0ILeG550Tsliyw",
+    "e": "AQAB"
+   }
+  ]
+ },
+ "token_parts": [
+  "eyJhbGciOiJSUzI1NiIsImtpZCI6InRlc3Qta2V5LTEiLCJ0eXAiOiJKV1QifQ",
+  "eyJpc3MiOiJodHRwczovL3Rva2VuLmFjdGlvbnMuZ2l0aHVidXNlcmNvbnRlbnQuY29tIiwiYXVkIjoiZGVwbG95LXdvcmtmbG93cy1wbGFuOnYxOjM5NWQ3ODkyNTUwMWM1ZTIwNWU1ODVmODhkZWZlYmRhODI3ODc4YmY3ZTBkMzQxOGU5ZDI5OGZjODA4ZDVhZjkiLCJzdWIiOiJyZXBvOnRvYmlwanVrL3N0YXJodW50ZXJjcmV3OnJlZjpyZWZzL2hlYWRzL21haW46ZXZlbnRfbmFtZTpwdXNoOmFjdG9yOnRvYmlwanVrOnJ1bl9hdHRlbXB0OjE6am9iX3dvcmtmbG93X3JlZjp0b2JpcGp1ay9kZXBsb3ktd29ya2Zsb3dzLy5naXRodWIvd29ya2Zsb3dzL3RmLXBsYW4ueW1sQHJlZnMvaGVhZHMvbWFpbiIsInJlcG9zaXRvcnkiOiJ0b2JpcGp1ay9zdGFyaHVudGVyY3JldyIsInJlcG9zaXRvcnlfb3duZXIiOiJ0b2JpcGp1ayIsInJlZiI6InJlZnMvaGVhZHMvbWFpbiIsInNoYSI6IjFhMmIzYzRkNWU2ZjcwODE5MmEzYjRjNWQ2ZTdmODA5MWEyYjNjNGQiLCJldmVudF9uYW1lIjoicHVzaCIsImFjdG9yIjoidG9iaXBqdWsiLCJydW5faWQiOiIxODIzNDU2Nzg5MCIsInJ1bl9udW1iZXIiOiI3IiwicnVuX2F0dGVtcHQiOiIxIiwid29ya2Zsb3dfcmVmIjoidG9iaXBqdWsvc3Rhcmh1bnRlcmNyZXcvLmdpdGh1Yi93b3JrZmxvd3MvcGxhbi55bWxAcmVmcy9oZWFkcy9tYWluIiwiam9iX3dvcmtmbG93X3JlZiI6InRvYmlwanVrL2RlcGxveS13b3JrZmxvd3MvLmdpdGh1Yi93b3JrZmxvd3MvdGYtcGxhbi55bWxAcmVmcy9oZWFkcy9tYWluIiwicnVubmVyX2Vudmlyb25tZW50IjoiZ2l0aHViLWhvc3RlZCIsImlhdCI6MTc5MjkyNDk5MCwibmJmIjoxNzkyOTI0OTg1LCJleHAiOjE3OTI5MjUyOTB9",
+  "aA8Dn1pk0ezQYYbt3k3XpIzTD26A2eTfxZyrCIYlMM8QEHNu6nQE6WagZAUNY4VvKCX168eyIcrC3KqV4qwcOSyKHhxqXcqRtEDkSpxK2BO-9qY0pFcWzlJzUYWLasHqYG5KQ-8g9w1-3CpNpogGGL9jowvzRNFWBmMwzIBuDGZLjBHAy-ffjRmrhBQxFrjRpy5hAoBr5A2IOHnb5HPcFuy9qDjrlbvW3qbSOozyqTCR4GFOjS0ELcmvMMn7con5MLF8Irp7zHyNkYvknlmUOfO3d1w9vRSc1AbZ9LEM-kIlyfslkiVdPwG1qKPRmU-DpB8q59v4MvFrubXiGTkKLw"
+ ],
+ "manifest": "{\"bundle_sha256\":\"2a8a9d944458564abae006e269da069ea3903a114e98303372cbbefee254bfee\",\"repo\":\"tobipjuk/starhuntercrew\",\"run_attempt\":1,\"run_id\":18234567890,\"schema\":1,\"sha\":\"1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d\",\"summary_sha256\":\"951100431a6f44c5e81ab15634792e3d0be522af39146ac015b94b882cff2945\",\"type\":\"deploy-workflows-plan\"}",
+ "aud": "deploy-workflows-plan:v1:395d78925501c5e205e585f88defebda827878bf7e0d3418e9d298fc808d5af9",
+ "bundle_b64": "ZXhhbXBsZSBwbGFuIGJ1bmRsZSBieXRlcwo=",
+ "summary": "{\n \"bundle_artifact\": \"plan-bundle\",\n \"bundle_sha256\": \"2a8a9d944458564abae006e269da069ea3903a114e98303372cbbefee254bfee\",\n \"changes\": [\n  {\n   \"actions\": [\n    \"update\"\n   ],\n   \"address\": \"module.app.aws_s3_object.site[\\\"sw.js\\\"]\"\n  }\n ],\n \"changes_digest\": \"8a4f68f5c8162eae32e9664285eb536729303d4eb07d3983242e7f4956199b62\",\n \"repo\": \"tobipjuk/starhuntercrew\",\n \"run_attempt\": 1,\n \"run_id\": 18234567890,\n \"schema\": 1,\n \"sha\": \"1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d\",\n \"target\": \"starhuntercrew\"\n}\n",
+ "params": {
+  "repo": "tobipjuk/starhuntercrew",
+  "run_id": 18234567890,
+  "run_attempt": 1,
+  "sha": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+  "not_before": "2026-10-25T10:40:00Z",
+  "not_after": "2026-10-25T10:44:30Z",
+  "bundle_sha256": "2a8a9d944458564abae006e269da069ea3903a114e98303372cbbefee254bfee",
+  "summary_sha256": "951100431a6f44c5e81ab15634792e3d0be522af39146ac015b94b882cff2945",
+  "changes_digest": "8a4f68f5c8162eae32e9664285eb536729303d4eb07d3983242e7f4956199b62"
+ }
+}

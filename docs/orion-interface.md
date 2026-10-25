@@ -58,6 +58,11 @@ Every 60 s, for each registered repo:
    - `referenced_workflows` contains an entry whose `path` starts with
      `tobipjuk/deploy-workflows/.github/workflows/tf-plan.yml@` and whose `ref` is
      `refs/heads/main`;
+   - **every** `referenced_workflows` entry has a `path` starting with
+     `tobipjuk/deploy-workflows/` and `ref == "refs/heads/main"`;
+   - **exactly one job** over all attempts:
+     `GET /repos/{o}/{r}/actions/runs/{run_id}/jobs?filter=all` → `total_count == 1`
+     (an extra job in the same run could replace the artifacts, see 4a; re-run plans are refused);
    - `head_sha` equals main's current head: `GET /repos/{o}/{r}/branches/main` → `commit.sha`;
    - age: `now - run_started_at < 2 h` (use the API's timestamp, not the summary's).
 4. A newer accepted plan for the same repo **supersedes** any older pending one: edit the older
@@ -67,14 +72,17 @@ Rate: 3 API calls per repo per minute is far inside the App's 5,000/h.
 
 ## 4. Reading the plan summary
 
-1. `GET /repos/{o}/{r}/actions/runs/{run_id}/artifacts` → find `name == "plan-summary"` and
-   `name == "plan-bundle"`, both with `expired == false`. No `plan-summary` = the plan had no
+1. `GET /repos/{o}/{r}/actions/runs/{run_id}/artifacts` → find `name == "plan-summary"`,
+   `name == "plan-bundle"` and `name == "plan-attestation"`, all with `expired == false`
+   (exactly one of each name; duplicates = refuse). No `plan-summary` = the plan had no
    changes: mark handled, no message. `plan-summary` but no `plan-bundle` = project has no deploy
    role: mark handled, optionally send an info message without buttons.
 2. `GET {archive_download_url}` (302 to a short-lived blob URL; follow it **without** forwarding
    the Authorization header). It is a zip: refuse if > 1 MB, if it holds anything other than one
    member `plan-summary.json`, or if that member is > 2 MB uncompressed.
-3. Parse JSON and validate. Refuse (log, no message) unless:
+3. **Verify the attestation (section 4a) before anything else**; the bytes of
+   `plan-summary.json` it is checked against are exactly the bytes you then parse and show.
+4. Parse JSON and validate. Refuse (log, no message) unless:
    - `schema == 1`, `repo` == registered repo, `target` == registered target,
      `run_id == run.id`, `sha == run.head_sha`;
    - `has_changes == true`, `deployable == true`, `blocked == []`;
@@ -87,7 +95,7 @@ Canonical form of `changes`: the array **in the order given** (don't re-sort), e
 an object with keys `actions` then `address` (sorted keys), serialised with no whitespace
 (`,` and `:` separators), non-ASCII characters escaped as `\uXXXX` with lowercase hex
 (Python `json.dumps(changes, sort_keys=True, separators=(",", ":"), ensure_ascii=True)`; in JS:
-`JSON.stringify` of `{actions, address}` objects, then replace `/[\u0080-￿]/g` with
+`JSON.stringify` of `{actions, address}` objects, then replace `/[\u0080-\uffff]/g` with
 `\\u` + 4-digit lowercase hex). sha256 over the UTF-8 (= ASCII) bytes, lowercase hex.
 
 Test vector:
@@ -116,6 +124,68 @@ sha256 = 3b67c029e1b57856cef4f4db0542dd374b4548e25f944a35389a94546f2d384e
 | `diff` | Up to 40 updated/replaced resources × 8 attributes: `{address, attrs: [{path, before, after}]}`; values ≤ 60 chars, sensitive or secret-named attributes are `(hidden)`, unknown ones `(known after apply)` |
 | `diff_truncated` | Boolean |
 | `bundle_sha256`, `bundle_artifact` | Hash and artifact name (`plan-bundle`) of the bundle |
+
+## 4a. Plan attestation (Guardian F1)
+
+**Why.** `plan.yml` lives in the project repo, which the box can write. A job it adds to the
+same run (`needs: plan`, `actions: write`) can download `plan-bundle`, keep the genuine tfplan,
+swap a Lambda zip, re-tar it, and re-upload `plan-bundle` and `plan-summary` with a matching
+`bundle_sha256` and any diff text. The changes digest covers only addresses and actions, so it
+wouldn't notice. Therefore tf-plan.yml, inside its own job, requests a GitHub OIDC token whose
+**audience commits to the sha256 of the bundle and of `plan-summary.json`**. Only a job running
+deploy-workflows' `tf-plan.yml@refs/heads/main` gets a token with that `job_workflow_ref`; a
+box-added job's token carries the project's own workflow ref. The token is not an AWS
+credential (its `aud` is not `sts.amazonaws.com`).
+
+Artifact `plan-attestation` (zip, two members, each ≤ 64 KB; refuse anything else):
+
+- `manifest.json`: canonical JSON (sorted keys, no whitespace, ASCII), exactly these fields:
+
+  ```
+  {"bundle_sha256":"<64 hex>","repo":"<owner>/<name>","run_attempt":<int>,"run_id":<int>,
+   "schema":1,"sha":"<40 hex>","summary_sha256":"<64 hex>","type":"deploy-workflows-plan"}
+  ```
+
+  `bundle_sha256` = sha256 of `plan-bundle.tar`; `summary_sha256` = sha256 of the **exact bytes**
+  of `plan-summary.json` (the whole file: changes, digest, diff, flags, everything shown).
+- `token.jwt`: the GitHub Actions OIDC token (compact JWS).
+
+**Audience format:** `deploy-workflows-plan:v1:` + lowercase hex sha256 of the manifest bytes
+exactly as stored (they must already be canonical: re-serialise and compare bytes; any
+difference = refuse).
+
+**Verification (Orion and tf-apply do the same):**
+
+1. JWT header `alg == "RS256"` (anything else, incl. `none`/`HS256`, = refuse); `kid` selects a
+   key from GitHub's JWKS `https://token.actions.githubusercontent.com/.well-known/jwks`
+   (`kty RSA`, ≥ 2048 bits); RSASSA-PKCS1-v1_5 SHA-256 signature valid.
+2. Claims: `iss == "https://token.actions.githubusercontent.com"`;
+   `aud ==` the audience above (string, or a one-element array);
+   `job_workflow_ref == "tobipjuk/deploy-workflows/.github/workflows/tf-plan.yml@refs/heads/main"`;
+   `repository ==` the registered repo; `run_id ==` the plan run id (string);
+   `run_attempt ==` the run's `run_attempt` from the API (string); `sha ==` the run's `head_sha`;
+   `ref == "refs/heads/main"`; `event_name` is `push` or `workflow_dispatch`;
+   `iat` within `[run_started_at - 120 s, updated_at + 120 s]` of the run. **Ignore `exp`** (the
+   token is a signature over the manifest; it expires minutes after the plan).
+3. Manifest: fields exactly as above; `repo`, `run_id`, `run_attempt`, `sha` equal the run's.
+4. `sha256(plan-summary.json bytes) == summary_sha256`; inside the summary,
+   `bundle_sha256 == manifest.bundle_sha256` (Orion doesn't download the bundle; tf-apply
+   additionally checks `sha256(plan-bundle.tar)`). The dispatched `bundle_sha256` and
+   `changes_digest` must be the attested summary's values.
+
+**Test vector:** `tests/fixtures/attestation-vector.json` (throwaway key, public half only):
+`jwks`, `token_parts` (join with `.`), `manifest`, `aud`, `bundle_b64`, `summary`, `params`
+(`repo`, `run_id`, `run_attempt`, `sha`, `not_before` = run_started_at, `not_after` = updated_at,
+`bundle_sha256`, `summary_sha256`, `changes_digest`). Its values:
+
+```
+manifest = {"bundle_sha256":"2a8a9d944458564abae006e269da069ea3903a114e98303372cbbefee254bfee","repo":"tobipjuk/starhuntercrew","run_attempt":1,"run_id":18234567890,"schema":1,"sha":"1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d","summary_sha256":"951100431a6f44c5e81ab15634792e3d0be522af39146ac015b94b882cff2945","type":"deploy-workflows-plan"}
+aud      = deploy-workflows-plan:v1:395d78925501c5e205e585f88defebda827878bf7e0d3418e9d298fc808d5af9
+```
+
+The token verifies against the vector's `jwks` with `params`; flipping one byte of the bundle,
+the summary, the signature or any claim must fail. `tests/test_attest.py` is the reference
+behaviour (`scripts/attest.py verify`).
 
 ## 5. The Telegram message
 
@@ -166,8 +236,9 @@ On `callback_query`:
 2. Look up the id: unknown, used, rejected, expired or superseded → answer "Expired" and do
    nothing.
 3. `Reject` → mark handled, edit the message to "Rejected by Tobi at HH:MM", remove buttons.
-4. `Approve` → re-check section 3 **now** (still the newest successful plan run, main head
-   unchanged, `< 2 h`) and that `plan-bundle` is still present and unexpired. Any failure:
+4. `Approve` → re-check section 3 **now** (still the newest successful plan run, one job, main
+   head unchanged, `< 2 h`) and that `plan-bundle` and `plan-attestation` are still present and
+   unexpired (same artifact ids as when offered). Any failure:
    edit to "Not deployed: <reason>" and stop. Then dispatch (section 7).
 
 Audit log every offer, tap (user id, time), dispatch and result on the Orion server.

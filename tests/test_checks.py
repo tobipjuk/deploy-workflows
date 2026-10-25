@@ -69,6 +69,21 @@ class PlanRunTest(unittest.TestCase):
         self.assertTrue(ev(run(referenced_workflows=[])))
         self.assertTrue(ev(run(referenced_workflows=None)))
 
+    def test_job_count(self):
+        self.assertEqual(cpr.evaluate(run(), 42, NOW, REPO, SHA, ".github/workflows/plan.yml", REUSABLE, 7200,
+                                      jobs=[{"name": "plan / terraform plan"}]), [])
+        for jobs in ([], [{}, {}], [{}, {}, {}]):
+            problems = cpr.evaluate(run(), 42, NOW, REPO, SHA, ".github/workflows/plan.yml", REUSABLE, 7200, jobs=jobs)
+            self.assertTrue(any("exactly 1" in p for p in problems), jobs)
+
+    def test_every_referenced_workflow_from_anchor_main(self):
+        good = {"path": REUSABLE + "@main", "ref": "refs/heads/main", "sha": "d" * 40}
+        for extra in ({"path": "evil/repo/.github/workflows/x.yml@main", "ref": "refs/heads/main"},
+                      {"path": "tobipjuk/deploy-workflows/.github/workflows/tf-plan.yml@dev", "ref": "refs/heads/dev"},
+                      {"path": "tobipjuk/deploy-workflows-evil/.github/workflows/tf-plan.yml@main", "ref": "refs/heads/main"}):
+            problems = ev(run(referenced_workflows=[good, extra]))
+            self.assertTrue(any("outside" in p for p in problems), extra)
+
     def test_newer_run_supersedes(self):
         self.assertTrue(any("newer" in p for p in ev(run(), latest=43)))
         self.assertTrue(any("newer" in p for p in ev(run(), latest=None)))

@@ -16,6 +16,8 @@ also one tf-apply accepts:
     newer commit on main supersedes it
   - it is the newest successful plan run on main
   - it started less than --max-age-seconds ago (2 h)
+  - every referenced reusable workflow is from deploy-workflows at refs/heads/main
+  - it has exactly one job over all attempts (no extra job that could swap artifacts)
 """
 import argparse
 import datetime as dt
@@ -33,7 +35,8 @@ def parse_time(s):
     return dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
 
 
-def evaluate(run, latest_id, now, repo, expected_sha, plan_workflow, reusable, max_age):
+def evaluate(run, latest_id, now, repo, expected_sha, plan_workflow, reusable, max_age, jobs=None):
+    """jobs = the run's jobs from /jobs?filter=all (None = not checked)."""
     problems = []
     path = str(run.get("path") or "")
     if path != plan_workflow and not path.startswith(plan_workflow + "@"):
@@ -54,6 +57,17 @@ def evaluate(run, latest_id, now, repo, expected_sha, plan_workflow, reusable, m
     if not any(str(r.get("path", "")).startswith(reusable + "@") and r.get("ref") == "refs/heads/main"
                for r in refs):
         problems.append(f"run did not use {reusable}@refs/heads/main")
+    # Every reusable workflow in the run must come from deploy-workflows' main: a box-written
+    # plan.yml must not pull in anything else.
+    anchor = reusable.split("/.github/")[0] + "/"
+    for r in refs:
+        if not (str(r.get("path", "")).startswith(anchor) and r.get("ref") == "refs/heads/main"):
+            problems.append(f"run references a workflow outside {anchor}@refs/heads/main: {r.get('path')!r}")
+    # Exactly one job (the tf-plan job), over all attempts: an extra job in the same run could
+    # replace the run's artifacts (Guardian F1); a re-run adds jobs too.
+    if jobs is not None:
+        if len(jobs) != 1:
+            problems.append(f"plan run has {len(jobs)} jobs (all attempts); exactly 1 (tf-plan) is required")
     if latest_id is None or int(latest_id) != int(run.get("id", -1)):
         problems.append("a newer successful plan run exists on main (superseded)")
     try:
@@ -84,6 +98,7 @@ def main(argv=None):
     ap.add_argument("--max-age-seconds", type=int, default=7200)
     ap.add_argument("--plan-workflow", default=".github/workflows/plan.yml")
     ap.add_argument("--reusable", default="tobipjuk/deploy-workflows/.github/workflows/tf-plan.yml")
+    ap.add_argument("--facts-out", help="write run_attempt, run_started_at, updated_at as JSON")
     args = ap.parse_args(argv)
     if not re.fullmatch(r"[1-9][0-9]{0,19}", args.run_id):
         print("::error::plan_run_id must be a run id (digits)", file=sys.stderr)
@@ -101,17 +116,30 @@ def main(argv=None):
         wf = urllib.parse.quote(os.path.basename(args.plan_workflow))
         latest = get(f"/repos/{args.repo}/actions/workflows/{wf}/runs"
                      "?branch=main&status=success&per_page=1", token)
+        jobs_doc = get(f"/repos/{args.repo}/actions/runs/{args.run_id}/jobs?filter=all&per_page=100", token)
     except Exception as e:  # noqa: BLE001 - any API failure refuses the deploy
         print(f"::error::cannot read the plan run: {e.__class__.__name__}", file=sys.stderr)
         return 1
     runs = latest.get("workflow_runs") or []
     latest_id = runs[0].get("id") if runs else None
+    listed = jobs_doc.get("jobs") or []
+    try:
+        count = max(int(jobs_doc.get("total_count", len(listed))), len(listed))
+    except (TypeError, ValueError):
+        count = -1
+    jobs = listed if count == len(listed) else [None] * max(count, 0)
+    if count < 0:
+        jobs = [None, None]  # unreadable count: fail closed
     problems = evaluate(run, latest_id, dt.datetime.now(dt.timezone.utc), args.repo,
-                        args.expected_sha, args.plan_workflow, args.reusable, args.max_age_seconds)
+                        args.expected_sha, args.plan_workflow, args.reusable, args.max_age_seconds, jobs)
     for p in problems:
         print(f"::error::Plan run {args.run_id}: {p}", file=sys.stderr)
     if problems:
         return 1
+    if args.facts_out:
+        with open(args.facts_out, "w", encoding="utf-8") as f:
+            json.dump({"run_attempt": run.get("run_attempt"), "run_started_at": run.get("run_started_at"),
+                       "updated_at": run.get("updated_at")}, f)
     print(f"plan run {args.run_id} ok (commit {args.expected_sha[:12]}, started {run.get('run_started_at')})")
     return 0
 

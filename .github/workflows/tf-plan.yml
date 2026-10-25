@@ -18,6 +18,8 @@
 #   artifact plan-bundle   tfplan + build files + SOURCE + SHA256SUMS, 1 day. Uploaded ONLY when
 #                          the project has a deploy role (deploy_enabled), because a saved plan
 #                          can hold sensitive values.
+#   artifact plan-attestation  manifest.json + token.jwt: a GitHub OIDC token minted in this job
+#                          whose aud commits to the bundle's and the summary's sha256 (with the bundle).
 name: tf-plan (reusable)
 
 on:
@@ -251,6 +253,41 @@ jobs:
               f.write("\n")
           PY
           echo "Plan bundle sha256: \`$sum\` (build files: $files)" >> "$GITHUB_STEP_SUMMARY"
+
+      # Guardian F1: any other job in this run could replace the artifacts. An OIDC token minted
+      # HERE (job_workflow_ref = tf-plan.yml@main, which no other job can carry) whose audience
+      # commits to the bundle and the final plan-summary.json makes a swap detectable by
+      # tf-apply and Orion. Not an AWS credential: its aud is not sts.amazonaws.com.
+      - name: Attest the bundle and summary (OIDC token over the manifest)
+        id: attest
+        if: steps.bundle.outputs.sha256 != ''
+        env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/plan-attestation"
+          mkdir -p "$dir"
+          aud=$(python3 -I "$TOOLS/scripts/attest.py" manifest --repo "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --sha "$GITHUB_SHA" \
+            --bundle "$RUNNER_TEMP/plan-bundle.tar" --summary "$RUNNER_TEMP/plan-summary.json" \
+            --out "$dir/manifest.json" | sed -n 's/^aud=//p')
+          [[ "$aud" =~ ^deploy-workflows-plan:v1:[0-9a-f]{64}$ ]] || { echo "::error::bad audience"; exit 1; }
+          curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=${aud//:/%3A}" \
+            | python3 -Ic 'import json,sys; sys.stdout.write(json.load(sys.stdin)["value"])' > "$dir/token.jwt"
+          [ -s "$dir/token.jwt" ] || { echo "::error::no attestation token"; exit 1; }
+          echo "Plan attestation audience: \`$aud\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the plan attestation
+        if: steps.attest.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plan-attestation
+          path: |
+            ${{ runner.temp }}/plan-attestation/manifest.json
+            ${{ runner.temp }}/plan-attestation/token.jwt
+          retention-days: 1
+          if-no-files-found: error
 
       - name: Upload the plan bundle
         if: steps.bundle.outputs.sha256 != ''
