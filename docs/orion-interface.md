@@ -285,14 +285,33 @@ a second approval until the first finishes.
    for the newest run with `actor.login == "<slug>[bot]"` and `created_at >=` dispatch time
    minus 5 s (up to 2 min).
 2. Poll `GET /repos/{o}/{r}/actions/runs/{id}` every 20 s until `status == "completed"`
-   (give up after 75 min and say so).
-3. Report by editing the approval message (and a short new message so Telegram notifies):
-   - success: download the `deploy-result` artifact (same zip rules; one member
-     `deploy-result.json`: `status`, `applied` counts, `sha`, ids) → "Deployed starhuntercrew
-     1a2b3c4: +2 ~5 -0 ±0, invalidations done, smoke ok" + run link;
-   - failure: `GET /repos/{o}/{r}/actions/runs/{id}/jobs` → first job/step with
-     `conclusion == "failure"` → "Deploy FAILED at <job> / <step>" + run link. A refusal by
-     a gate (digest, destroy, plan run checks) shows up the same way.
+   (the apply job times out after 45 min; give up after 60 min and say so).
+3. Download the `deploy-result` artifact whenever it exists, whatever the run's conclusion
+   (same zip rules; one member `deploy-result.json`, ≤ 64 KB). Schema 2:
+
+   | Field | Meaning |
+   |---|---|
+   | `schema` | 2 |
+   | `target`, `repo`, `sha`, `deploy_run_id`, `plan_run_id`, `bundle_sha256`, `changes_digest` | Identity; must match what was dispatched |
+   | `applied` | Boolean: `terraform apply` of the saved plan succeeded |
+   | `counts` | `add`, `change`, `destroy`, `replace` (ints or null) |
+   | `checks` | Post-apply checks: `egress` (`ok`/`warning`/`skipped`), `invalidation` (`ok`/`failed`/`pending`/`skipped`), `smoke` (`ok`/`failed`/`skipped`) |
+   | `status` | `deployed` / `deployed_with_warnings` / `failed` (below) |
+   | `summary` | Short text, e.g. `applied, egress warning`, `applied, invalidation pending` |
+
+4. Report by editing the approval message (and a short new message so Telegram notifies):
+   - **✅ deployed**: `applied == true` and `status == "deployed"` (every check ok or skipped)
+     → "✅ Deployed starhuntercrew 1a2b3c4: +2 ~5 -0 ±0, checks ok" + run link.
+   - **⚠️ deployed, checks pending/failed**: `applied == true` and
+     `status == "deployed_with_warnings"` → "⚠️ Deployed starhuntercrew 1a2b3c4, <summary>"
+     (e.g. "applied, egress warning", "applied, invalidation pending", "applied, smoke failed")
+     + run link. The change IS live; Tobi looks at the run. The job itself concludes success.
+   - **anything else is a failure**: `applied == false`, `status == "failed"`, a missing or
+     invalid result, or a run that didn't complete. `GET /repos/{o}/{r}/actions/runs/{id}/jobs`
+     → first job/step with `conclusion == "failure"` → "❌ Deploy FAILED at <job> / <step>" + run
+     link. A refusal by a gate (digest, destroy, plan run checks) shows up the same way.
+   Validate `applied` against `status` (`deployed*` requires `applied == true`, `failed`
+   requires `false`); a mismatch is a failure.
 
 Never re-run a failed deploy run (AWS refuses attempt 2 anyway). A fix means a new commit,
 a new plan and a new approval.

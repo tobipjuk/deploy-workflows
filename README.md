@@ -34,7 +34,8 @@ Orion (server) polls plan runs ◄───────────────�
 | `scripts/attest.py` | Plan attestation: manifest + audience, RS256/JWKS verification of the tf-attest OIDC token |
 | `scripts/tf_sandbox.sh` | Runs Terraform as an unprivileged user with a scrubbed environment and egress firewall |
 | `scripts/egress_proxy.py` | The sandbox's only way out: CONNECT proxy for AWS + Terraform registry hosts |
-| `scripts/check_tf_config.py` | Static pre-plan gate on provider/backend/terraform blocks and module sources |
+| `scripts/check_tf_config.py` | Static pre-plan gate on provider/backend/terraform blocks, data sources, ephemeral/action blocks and module sources |
+| `scripts/deploy_result.py` | `deploy-result.json` (applied, checks, status) for Orion |
 | `scripts/check_plan_run.py` | Is this plan run deployable (main, newest, < 2 h, made by tf-plan.yml)? |
 | `scripts/check_lockfile.py` | Provider allowlist, checked before `terraform init` |
 | `policy/allowed-providers.txt` | Providers a deploy may use |
@@ -156,7 +157,9 @@ tf-plan (with the plan role):
 - override files, `*.auto.tfvars`, CLI config files in the repo → refused;
 - lock file providers outside the allowlist → refused **before** `init`, so the provider never runs;
 - provider/backend/terraform settings outside the CI allowlist (endpoints, proxies, CA bundles,
-  shared config files, assume_role, skip_* ...) and non-local modules → refused before `init`;
+  shared config files, assume_role, skip_* ...), data sources outside the allowlist (no
+  `aws_kms_ciphertext`/`aws_kms_secrets`/`aws_lambda_invocation`/value reads), ephemeral
+  resources other than `random_password`, action blocks and non-local modules → refused before `init`;
 - Terraform runs sandboxed: own uid, `env -i`, egress only through the allowlisting proxy;
 - plan JSON: provisioners, `external` data sources, providers outside the allowlist → blocked;
 - deletes, replacements, unknown or missing actions, `action_invocations`, `deferred_changes`,
@@ -180,7 +183,10 @@ tf-apply (with the deploy role; AWS has already checked actor/event/attempt/work
 - the plan file again: changes digest = the one Tobi approved, destroy gate (with the dispatched
   `allow_destroy`), code execution and provider gates;
 - `terraform apply tfplan` (never re-plans; Terraform rejects a stale plan);
-- invalidations from `terraform output` names, smoke check without credentials;
+- invalidations from `terraform output` names (one wait loop, 15-minute deadline), smoke check
+  without credentials, egress check: all post-apply checks, non-fatal; `deploy-result.json`
+  records `applied` separately from `checks` and a `status` of `deployed`,
+  `deployed_with_warnings` or `failed`; the job fails only if nothing was applied (45-minute cap);
 - an optional project post-deploy script runs in a **separate job with no AWS credentials**.
 
 ## Threat model

@@ -166,6 +166,39 @@ class TfConfigTest(unittest.TestCase):
         self.write("infra/rs.tf.json", json.dumps({"data": {"terraform_remote_state": {"z": {"backend": "s3"}}}}))
         self.assertTrue(any("terraform_remote_state" in p for p in self.check()))
 
+    def test_data_source_allowlist(self):
+        for t in ("aws_kms_ciphertext", "aws_kms_secrets", "aws_lambda_invocation",
+                  "aws_secretsmanager_secret_version", "aws_ssm_parameter", "aws_s3_object", "aws_lambda_function",
+                  "aws_ecr_authorization_token", "http", "external"):
+            problems = self.add(f'data "{t}" "x" {{}}\n')
+            self.assertTrue(any(t in p and "allowlist" in p for p in problems), (t, problems))
+        for t in ("aws_caller_identity", "aws_iam_policy_document", "aws_route53_zone", "archive_file"):
+            self.assertEqual(self.add(f'data "{t}" "x" {{}}\n'), [], t)
+
+    def test_data_in_check_block_and_nested_module(self):
+        problems = self.add('check "c" {\n data "aws_lambda_invocation" "x" {\n function_name = "f"\n input = "{}"\n }\n'
+                            ' assert {\n condition = true\n error_message = "x"\n }\n}\n')
+        self.assertTrue(any("aws_lambda_invocation" in p for p in problems), problems)
+        self.write("infra/modules/site/k.tf", 'data "aws_kms_secrets" "s" {}\n')
+        self.assertTrue(any("aws_kms_secrets" in p for p in self.check()))
+
+    def test_ephemeral_and_action_blocks(self):
+        self.assertEqual(self.add('ephemeral "random_password" "p" {\n length = 32\n}\n'), [])
+        for body in ('ephemeral "aws_secretsmanager_secret_version" "s" {\n secret_id = "x"\n}\n',
+                     'ephemeral "aws_lambda_invocation" "i" {\n function_name = "f"\n payload = "{}"\n}\n',
+                     'action "aws_lambda_invoke" "a" {\n config {\n function_name = "f"\n }\n}\n'):
+            self.assertTrue(self.add(body), body)
+
+    def test_json_data_ephemeral_check_action(self):
+        for doc in ({"data": {"aws_kms_ciphertext": {"x": {"plaintext": "s"}}}},
+                    {"ephemeral": {"aws_kms_secrets": {"x": {}}}},
+                    {"check": {"c": {"data": {"aws_lambda_invocation": {"x": {}}}}}},
+                    {"action": {"aws_lambda_invoke": {"a": {}}}}):
+            self.write("infra/j.tf.json", json.dumps(doc))
+            self.assertTrue(self.check(), doc)
+        self.write("infra/j.tf.json", json.dumps({"data": {"aws_partition": {"p": {}}}}))
+        self.assertEqual(self.check(), [])
+
     def test_builtin_types(self):
         self.assertEqual(self.add('resource "terraform_data" "t" {\n input = "x"\n}\n'), [])
         self.assertTrue(self.add('data "terraform_something" "t" {}\n'))

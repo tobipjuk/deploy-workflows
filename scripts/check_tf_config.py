@@ -17,6 +17,8 @@ Checks the root module in DIR and every LOCAL module it calls (recursively):
   - profile (provider and backend): a literal equal to --profile, or a var.<name> reference (the
     sandbox holds only that one profile, so any other name simply fails)
   - module sources: local paths only ("./", "../"); registry/git modules are not scanned, refused
+  - data sources outside ALLOWED_DATA_SOURCES (also inside check blocks), ephemeral resources
+    other than random_password, and action blocks
   - data/resource types of Terraform's built-in provider other than terraform_data, in
     particular data "terraform_remote_state" (its `config` map is a backend config: endpoints,
     proxies, ... and it reads other state): refused
@@ -40,6 +42,22 @@ ALLOWED_AWS_PROVIDER_BLOCKS = {"default_tags": {"tags"}, "ignore_tags": {"keys",
 ALLOWED_S3_BACKEND_ATTRS = {"bucket", "key", "region", "encrypt", "use_lockfile", "profile", "kms_key_id",
                             "dynamodb_table", "workspace_key_prefix"}
 ALLOWED_TERRAFORM_ITEMS = {"required_version", "required_providers", "backend"}
+# Data sources run at PLAN time with the plan role (no approval). Allowlist of read-only lookups
+# that send no caller-supplied payload anywhere: the ones the onboarded projects use plus common
+# metadata reads. Everything else is refused, notably aws_kms_ciphertext / aws_kms_secrets
+# (encrypt/decrypt caller data), aws_lambda_invocation (runs a function with a payload),
+# secret/parameter/object VALUE reads (aws_secretsmanager_secret_version, aws_ssm_parameter,
+# aws_s3_object) and anything new until reviewed here.
+ALLOWED_DATA_SOURCES = {
+    "archive_file",
+    "aws_caller_identity", "aws_partition", "aws_region", "aws_availability_zones", "aws_default_tags",
+    "aws_iam_policy_document", "aws_iam_openid_connect_provider", "aws_iam_role", "aws_iam_policy",
+    "aws_cloudfront_cache_policy", "aws_cloudfront_response_headers_policy",
+    "aws_cloudfront_origin_request_policy", "aws_route53_zone", "aws_acm_certificate",
+    "aws_bedrock_inference_profile", "aws_secretsmanager_secret",  # metadata only, not the value
+}
+# Ephemeral resources also run at plan time; only local generators are allowed.
+ALLOWED_EPHEMERAL = {"random_password"}
 
 
 class ParseError(ValueError):
@@ -260,7 +278,9 @@ def parse_json(text, where):
             elif top == "module":
                 for mname, mval in entry.items():
                     items.append(Node("block", "module", [mname], _json_body(mval, f"module.{mname}")))
-            elif top in ("data", "resource"):
+            elif top in ("check", "action"):
+                items.append(Node("block", "action", [top], []))  # refused in JSON syntax
+            elif top in ("data", "resource", "ephemeral"):
                 if not isinstance(entry, dict):
                     raise ParseError(f"{top}: expected an object")
                 for rtype, named in entry.items():
@@ -327,6 +347,19 @@ def check_items(items, where, profile, problems, module_sources):
                             problems.append(f"{loc}: backend {btype} setting {b.name!r} is not allowed in CI")
                         elif b.name == "profile":
                             check_profile(b, profile, f"{loc} backend", problems)
+        elif n.name == "check":
+            # scoped data sources inside check blocks run at plan time too
+            check_items([i for i in n.body if i.kind == "block" and i.name == "data"], loc, profile, problems,
+                        module_sources)
+        elif n.name == "action":
+            problems.append(f"{loc}: action blocks are not allowed in CI")
+        elif n.name == "ephemeral":
+            etype = str(n.labels[0]) if n.labels else "?"
+            if etype not in ALLOWED_EPHEMERAL:
+                problems.append(f"{loc}: ephemeral {etype!r} is not allowed in CI")
+        elif n.name == "data" and (str(n.labels[0]) if n.labels else "?") not in ALLOWED_DATA_SOURCES:
+            problems.append(f"{loc}: data source {str(n.labels[0]) if n.labels else '?'!r} is not in the CI "
+                            "allowlist (deploy-workflows scripts/check_tf_config.py)")
         elif n.name in ("data", "resource"):
             rtype = str(n.labels[0]) if n.labels else "?"
             # Terraform's built-in provider: terraform_remote_state takes a backend `config` map

@@ -87,7 +87,7 @@ jobs:
   apply:
     name: terraform apply (approved plan)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     concurrency:
       group: tf-apply-${{ github.repository }}
       cancel-in-progress: false
@@ -338,6 +338,7 @@ jobs:
             --expect-digest "$CHANGES_DIGEST" --allow-destroy "$ALLOW_DESTROY"
 
       - name: terraform apply (saved plan, sandbox)
+        id: apply
         env:
           TOOLS: ${{ steps.tools.outputs.dir }}
           AWS_REGION: ${{ inputs.aws_region }}
@@ -345,16 +346,31 @@ jobs:
           set -euo pipefail
           bash "$TOOLS/scripts/tf_sandbox.sh" run "$TF_DIR" apply -input=false -no-color tfplan
 
-      # Any refused connection means the trusted policy lacks a host the code needs: fail with a
-      # pointer instead of a half-refreshed plan (hostnames are never logged; debug locally).
+      # Everything after a successful apply is a post-apply CHECK: it never turns an applied
+      # deploy into a failure. Each check writes ok|failed|pending|warning to $RUNNER_TEMP/checks;
+      # the result step reports "deployed" / "deployed_with_warnings" / "failed" (orion-interface §8).
       - name: Sandbox egress
+        id: egress_check
         if: always()
+        continue-on-error: true
         env:
           TOOLS: ${{ steps.tools.outputs.dir }}
-        run: bash "$TOOLS/scripts/tf_sandbox.sh" egress-check
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/checks"
+          if bash "$TOOLS/scripts/tf_sandbox.sh" egress-check; then
+            echo ok > "$RUNNER_TEMP/checks/egress"
+          else
+            echo warning > "$RUNNER_TEMP/checks/egress"
+            exit 1
+          fi
 
+      # Creates the invalidations, then waits for all of them in ONE loop with one overall
+      # deadline (15 min); still-running ones are reported as "pending", not as a failure.
       - name: Invalidate CloudFront
-        if: inputs.invalidate != ''
+        id: invalidate
+        if: steps.apply.outcome == 'success' && inputs.invalidate != ''
+        continue-on-error: true
         env:
           TOOLS: ${{ steps.tools.outputs.dir }}
           INVALIDATE: ${{ inputs.invalidate }}
@@ -362,6 +378,8 @@ jobs:
           AWS_PROFILE: ${{ inputs.aws_profile || 'default' }}
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/checks"
+          echo failed > "$RUNNER_TEMP/checks/invalidation"
           ids=()
           while IFS= read -r line; do
             line=$(printf '%s' "$line" | xargs)
@@ -381,20 +399,46 @@ jobs:
             echo "$out $dist $inv"
             ids+=("$out:$dist:$inv")
           done <<< "$INVALIDATE"
-          for i in "${ids[@]}"; do
-            IFS=: read -r name dist inv <<< "$i"
-            aws cloudfront wait invalidation-completed --distribution-id "$dist" --id "$inv"
-            echo "- Invalidation $name \`$dist\` \`$inv\`: completed" >> "$GITHUB_STEP_SUMMARY"
+          deadline=$(( $(date +%s) + 900 ))
+          pending=("${ids[@]}")
+          while [ "${#pending[@]}" -gt 0 ] && [ "$(date +%s)" -lt "$deadline" ]; do
+            still=()
+            for i in "${pending[@]}"; do
+              IFS=: read -r name dist inv <<< "$i"
+              st=$(aws cloudfront get-invalidation --distribution-id "$dist" --id "$inv" \
+                --query Invalidation.Status --output text 2>/dev/null || echo unknown)
+              if [ "$st" = Completed ]; then
+                echo "- Invalidation $name \`$dist\` \`$inv\`: completed" >> "$GITHUB_STEP_SUMMARY"
+              else
+                still+=("$i")
+              fi
+            done
+            pending=("${still[@]}")
+            [ "${#pending[@]}" -eq 0 ] || sleep 20
           done
+          if [ "${#pending[@]}" -gt 0 ]; then
+            for i in "${pending[@]}"; do
+              IFS=: read -r name dist inv <<< "$i"
+              echo "- Invalidation $name \`$dist\` \`$inv\`: still in progress at the deadline" >> "$GITHUB_STEP_SUMMARY"
+            done
+            echo pending > "$RUNNER_TEMP/checks/invalidation"
+            echo "::warning::CloudFront invalidations still in progress after 15 min (deploy is applied)"
+            exit 1
+          fi
+          echo ok > "$RUNNER_TEMP/checks/invalidation"
 
       - name: Smoke check
-        if: inputs.smoke_url != ''
+        id: smoke
+        if: steps.apply.outcome == 'success' && inputs.smoke_url != ''
+        continue-on-error: true
         env:
           SMOKE_URL: ${{ inputs.smoke_url }}
           EXPECT_FILE: ${{ inputs.smoke_expect_file }}
           PATTERN: ${{ inputs.smoke_pattern }}
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/checks"
+          echo failed > "$RUNNER_TEMP/checks/smoke"
           [[ "$SMOKE_URL" =~ ^https:// ]] || { echo "::error::smoke_url must be https"; exit 1; }
           expected=""
           if [ -n "$PATTERN" ]; then
@@ -409,9 +453,10 @@ jobs:
           done
           if $ok; then
             echo "- Smoke \`$SMOKE_URL\`: ok${expected:+ (\`$expected\`)}" >> "$GITHUB_STEP_SUMMARY"
+            echo ok > "$RUNNER_TEMP/checks/smoke"
           else
             echo "- Smoke \`$SMOKE_URL\`: FAILED${expected:+ (expected \`$expected\`)}" >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::Smoke check failed for $SMOKE_URL"
+            echo "::warning::Smoke check failed for $SMOKE_URL (deploy is applied)"
             exit 1
           fi
 
@@ -419,30 +464,21 @@ jobs:
         id: result
         if: always()
         env:
-          JOB_STATUS: ${{ job.status }}
+          APPLY_OUTCOME: ${{ steps.apply.outcome }}
+          INVALIDATE_OUTCOME: ${{ steps.invalidate.outcome }}
+          SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
           ADD: ${{ steps.gate.outputs.add }}
           CHANGE: ${{ steps.gate.outputs.change }}
           DESTROY: ${{ steps.gate.outputs.destroy }}
           REPLACE: ${{ steps.gate.outputs.replace }}
           TARGET: ${{ inputs.target }}
+          TOOLS_DIR: ${{ steps.tools.outputs.dir }}
         run: |
           set -euo pipefail
           rm -f "$TF_DIR/tfplan"
           sudo rm -rf /home/tfsandbox/src /home/tfsandbox/.aws || true
-          python3 -I - "$RUNNER_TEMP/deploy-result.json" <<'PY'
-          import json, os, sys
-          e = os.environ
-          doc = {
-              "schema": 1, "target": e["TARGET"], "repo": e["GITHUB_REPOSITORY"], "sha": e["GITHUB_SHA"],
-              "deploy_run_id": int(e["GITHUB_RUN_ID"]), "plan_run_id": e["PLAN_RUN_ID"],
-              "bundle_sha256": e["BUNDLE_SHA256"], "changes_digest": e["CHANGES_DIGEST"],
-              "status": e["JOB_STATUS"],
-              "applied": {k: e.get(k.upper()) or None for k in ("add", "change", "destroy", "replace")},
-          }
-          with open(sys.argv[1], "w", encoding="utf-8") as f:
-              json.dump(doc, f, indent=1, sort_keys=True)
-          PY
-          echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
+          python3 -I "$TOOLS_DIR/scripts/deploy_result.py" --checks-dir "$RUNNER_TEMP/checks" \
+            --out "$RUNNER_TEMP/deploy-result.json" --github-output "$GITHUB_OUTPUT"
 
       - name: Upload the deploy result
         if: always()
@@ -452,6 +488,14 @@ jobs:
           path: ${{ runner.temp }}/deploy-result.json
           retention-days: 7
           if-no-files-found: ignore
+
+      # The job fails only if the plan was not applied; post-apply check problems are in the
+      # result's status ("deployed_with_warnings"), not in the job conclusion.
+      - name: Fail unless applied
+        if: always() && steps.apply.outcome != 'success'
+        run: |
+          echo "::error::The plan was not applied."
+          exit 1
 
   post:
     name: post-deploy (no AWS credentials)
