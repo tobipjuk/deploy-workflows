@@ -12,6 +12,7 @@
 #   run TF_DIR ARGS...  sudo -u tfsandbox env -i ... terraform ARGS... in <sandbox>/src/TF_DIR;
 #                       stdout/stderr come back to the caller
 #   egress-report       print how many proxy connections were allowed/refused (counts only)
+#   egress-check        the same, and fail if any connection was refused (policy missing hosts)
 #   export DEST         copy the sandbox tree back (as root, symlinks kept as links, never
 #                       followed) and chown it to the runner user; callers must treat it as
 #                       untrusted (bundle.py skips links and non-regular files)
@@ -74,8 +75,14 @@ case "$cmd" in
     [ -n "$hosts" ] && [ -s "$hosts" ] || die "SANDBOX_EGRESS_HOSTS (exact egress host list) is not set: refusing"
     ready="${RUNNER_TEMP:-/tmp}/tf-sandbox-proxy.ready"
     rm -f "$ready"
+    debug=()
+    if [ -n "${SANDBOX_DEBUG_HOSTS_FILE:-}" ]; then
+      # Local debugging only: hostnames (which could carry secrets) go to a private file.
+      [ "${GITHUB_ACTIONS:-}" != "true" ] || die "SANDBOX_DEBUG_HOSTS_FILE is for local debugging only"
+      debug=(--debug-hosts-file "$SANDBOX_DEBUG_HOSTS_FILE")
+    fi
     nohup python3 -I "$HERE/egress_proxy.py" --port "$SANDBOX_PROXY_PORT" --hosts-file "$hosts" \
-      --stats "$STATS" --ready-file "$ready" >/dev/null 2>"${RUNNER_TEMP:-/tmp}/tf-sandbox-proxy.err" &
+      --stats "$STATS" --ready-file "$ready" "${debug[@]}" >/dev/null 2>"${RUNNER_TEMP:-/tmp}/tf-sandbox-proxy.err" &
     proxy_pid=$!
     for _ in $(seq 1 100); do
       [ -s "$ready" ] && break
@@ -106,11 +113,17 @@ case "$cmd" in
     fi
     echo "sandbox terraform: $ver ($SANDBOX_TF)"
     ;;
-  egress-report)
-    if [ -f "$STATS" ]; then
-      echo "sandbox egress (proxy connections): $(cat "$STATS")"
-    else
+  egress-report|egress-check)
+    if [ ! -f "$STATS" ]; then
       echo "sandbox egress: no proxy stats"
+      [ "$cmd" = egress-report ] || die "no egress proxy stats"
+      exit 0
+    fi
+    refused=$(python3 -Ic 'import json,sys; print(int(json.load(open(sys.argv[1]))["refused"]))' "$STATS")
+    echo "sandbox egress (proxy connections): $(cat "$STATS")"
+    if [ "$cmd" = egress-check ] && [ "$refused" != 0 ]; then
+      echo "::error::egress policy missing hosts — run the local debug to list them (refused connections: $refused; deploy-workflows tests/sandbox/local-plan.sh)"
+      exit 1
     fi
     ;;
   run)
@@ -120,12 +133,36 @@ case "$cmd" in
     [ -x "$SANDBOX_TF" ] || die "no sandbox terraform at $SANDBOX_TF (run setup first)"
     envs=(HOME="$SANDBOX_HOME" PATH="$SANDBOX_TF_DIR:/usr/bin:/bin" LANG=C.UTF-8
           TF_IN_AUTOMATION=1 TF_INPUT=0 CHECKPOINT_DISABLE=1
+          AWS_MAX_ATTEMPTS="${SANDBOX_AWS_MAX_ATTEMPTS:-2}" AWS_RETRY_MODE=standard
           HTTPS_PROXY="http://127.0.0.1:$SANDBOX_PROXY_PORT" HTTP_PROXY="http://127.0.0.1:$SANDBOX_PROXY_PORT"
           https_proxy="http://127.0.0.1:$SANDBOX_PROXY_PORT" http_proxy="http://127.0.0.1:$SANDBOX_PROXY_PORT")
     [ -z "${AWS_REGION:-}" ] || envs+=(AWS_REGION="$AWS_REGION" AWS_DEFAULT_REGION="$AWS_REGION")
+    # Fail fast (default): the AWS provider retries refused connections for a long time
+    # (max_retries 25 ignores AWS_MAX_ATTEMPTS), so a watchdog stops Terraform as soon as the
+    # proxy refuses anything during this command. SANDBOX_FAIL_ON_REFUSED=0 (local debug only)
+    # lets it run on to collect every missing host.
+    refused_now() { python3 -Ic 'import json,sys
+try: print(int(json.load(open(sys.argv[1]))["refused"]))
+except Exception: print(0)' "$STATS"; }
+    base=$(refused_now)
     # shellcheck disable=SC2016  # $1/$@ expand inside the sandbox shell
     sudo -n -u "$SANDBOX_USER" -H -- env -i "${envs[@]}" \
-      bash --noprofile --norc -c 'cd "$1" && shift && exec "$0" "$@"' "$SANDBOX_TF" "$SANDBOX_HOME/src/$tfdir" "$@"
+      bash --noprofile --norc -c 'cd "$1" && shift && exec "$0" "$@"' "$SANDBOX_TF" "$SANDBOX_HOME/src/$tfdir" "$@" &
+    tf_pid=$!
+    if [ "${SANDBOX_FAIL_ON_REFUSED:-1}" = 1 ]; then
+      while kill -0 "$tf_pid" 2>/dev/null; do
+        if [ "$(refused_now)" -gt "$base" ]; then
+          sudo pkill -KILL -u "$SANDBOX_USER" 2>/dev/null || true
+          wait "$tf_pid" 2>/dev/null || true
+          echo "::error::egress policy missing hosts — run the local debug to list them (the proxy refused a connection; terraform stopped)" >&2
+          exit 3
+        fi
+        sleep 2
+      done
+    fi
+    rc=0
+    wait "$tf_pid" || rc=$?
+    exit "$rc"
     ;;
   export)
     dest=${2:?usage: tf_sandbox.sh export DEST}
@@ -135,6 +172,6 @@ case "$cmd" in
     sudo chown -R -h "$(id -u):$(id -g)" "$dest"
     ;;
   *)
-    die "usage: tf_sandbox.sh setup SRC_DIR | run TF_DIR ARGS... | egress-report | export DEST"
+    die "usage: tf_sandbox.sh setup SRC_DIR | run TF_DIR ARGS... | egress-report | egress-check | export DEST"
     ;;
 esac

@@ -245,6 +245,25 @@ class EgressProxyRulesTest(unittest.TestCase):
         for h in bad:
             self.assertFalse(self.ep.host_allowed(h, allowed), h)
 
+    def test_dynamodb_account_endpoint(self):
+        hosts = self.shc_hosts(account_id="393686273578")
+        self.assertIn("393686273578.ddb.eu-west-2.amazonaws.com", hosts)
+        self.assertNotIn("393686273578.ddb.eu-west-2.amazonaws.com", self.shc_hosts(
+            account_id="393686273578", services=["lambda"]))
+        with self.assertRaises(self.eh.HostError):
+            self.shc_hosts(account_id="evil.example")
+        # only the project's own account, never another one
+        allowed = set(hosts) | self.ep.FIXED_HOSTS
+        self.assertFalse(self.ep.host_allowed("111111111111.ddb.eu-west-2.amazonaws.com", allowed))
+
+    def test_s3_control_account_endpoint(self):
+        hosts = self.shc_hosts(account_id="393686273578")
+        self.assertIn("393686273578.s3-control.eu-west-2.amazonaws.com", hosts)
+        self.assertNotIn("393686273578.s3-control.eu-west-2.amazonaws.com",
+                         self.shc_hosts(account_id="393686273578", buckets=[]))
+        allowed = set(hosts) | self.ep.FIXED_HOSTS
+        self.assertFalse(self.ep.host_allowed("111111111111.s3-control.eu-west-2.amazonaws.com", allowed))
+
     def test_path_style_is_opt_in(self):
         self.assertNotIn("s3.eu-west-2.amazonaws.com", self.shc_hosts())
         self.assertIn("s3.eu-west-2.amazonaws.com", self.shc_hosts(s3_path_style=True))

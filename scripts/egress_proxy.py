@@ -35,6 +35,7 @@ IDLE_TIMEOUT = 300
 _stats = {"allowed": 0, "refused": 0}
 _lock = threading.Lock()
 _stats_path = None
+_debug_path = None  # LOCAL DEBUG ONLY: hostnames go to this private file, never to logs
 
 
 def load_hosts(path):
@@ -76,9 +77,13 @@ def parse_connect(head):
     return m.group(1), int(m.group(2))
 
 
-def _count(key):
+def _count(key, host=None):
     with _lock:
         _stats[key] += 1
+        if _debug_path and host is not None:
+            fd = os.open(_debug_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "a") as f:
+                f.write(f"{key.upper()} {host}\n")
         if _stats_path:
             with open(_stats_path, "w") as f:
                 json.dump(_stats, f)
@@ -112,7 +117,7 @@ class Handler(socketserver.BaseRequestHandler):
             return
         target = parse_connect(head)
         if not target or target[1] != 443 or not host_allowed(target[0]):
-            _count("refused")
+            _count("refused", target[0] if target else "(not a CONNECT)")
             c.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
             return
         host, port = target
@@ -120,16 +125,16 @@ class Handler(socketserver.BaseRequestHandler):
             infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
             addr = next(i[4] for i in infos if global_address(i[4][0]))
         except (OSError, StopIteration, ValueError):
-            _count("refused")
+            _count("refused", host + " (no global address)")
             c.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
             return
         try:
             up = socket.create_connection(addr[:2], timeout=30)
         except OSError:
-            _count("refused")
+            _count("refused", host + " (connect failed)")
             c.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
             return
-        _count("allowed")
+        _count("allowed", host)
         c.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
         rest = head.split(b"\r\n\r\n", 1)[1]
         if rest:
@@ -150,12 +155,13 @@ class Server(socketserver.ThreadingTCPServer):
 
 
 def main(argv=None):
-    global _stats_path, _allowed
+    global _stats_path, _allowed, _debug_path
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=3128)
     ap.add_argument("--hosts-file", required=True)
     ap.add_argument("--stats")
     ap.add_argument("--ready-file")
+    ap.add_argument("--debug-hosts-file", help="LOCAL DEBUG ONLY: append ALLOWED/REFUSED <host> lines (0600)")
     args = ap.parse_args(argv)
     try:
         _allowed = load_hosts(args.hosts_file) | FIXED_HOSTS
@@ -163,6 +169,11 @@ def main(argv=None):
         print(f"egress proxy: {e}", file=sys.stderr)
         return 1
     _stats_path = args.stats
+    if args.debug_hosts_file:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            print("egress proxy: --debug-hosts-file is for local debugging only", file=sys.stderr)
+            return 1
+        _debug_path = args.debug_hosts_file
     if _stats_path:
         with open(_stats_path, "w") as f:
             json.dump(_stats, f)

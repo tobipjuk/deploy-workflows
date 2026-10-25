@@ -5,7 +5,7 @@
  "region": "eu-west-2",
  "state_bucket": "shc-tfstate-393686273578-euw2",
  "state_region": "eu-west-2",
- "services": ["lambda", "dynamodb", "logs", "ssm", "sns", "events", "monitoring", "apigateway", "email"],
+ "services": ["lambda", "dynamodb", "logs", "ssm", "sns", "events", "monitoring", "apigateway", "email", "kms"],
  "global_hosts": ["iam.amazonaws.com", "cloudfront.amazonaws.com", "route53.amazonaws.com",
                   "acm.us-east-1.amazonaws.com", "sts.us-east-1.amazonaws.com"],
  "buckets": ["shc-site-393686273578-euw2", "shc-app-393686273578-euw2", "shc-games-393686273578-euw2",

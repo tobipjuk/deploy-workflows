@@ -71,7 +71,7 @@ jobs:
     name: terraform plan
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     concurrency:
       group: tf-plan-${{ github.repository }}
       cancel-in-progress: false
@@ -244,11 +244,13 @@ jobs:
             echo
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Any refused connection means the trusted policy lacks a host the code needs: fail with a
+      # pointer instead of a half-refreshed plan (hostnames are never logged; debug locally).
       - name: Sandbox egress
         if: always()
         env:
           TOOLS: ${{ steps.tools.outputs.dir }}
-        run: bash "$TOOLS/scripts/tf_sandbox.sh" egress-report
+        run: bash "$TOOLS/scripts/tf_sandbox.sh" egress-check
 
       - name: Gates (destroy, code execution, providers)
         if: steps.report.outputs.has_changes == 'true'

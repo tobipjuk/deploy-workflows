@@ -27,7 +27,7 @@ kill "$squatter"; wait "$squatter" 2>/dev/null || true
 # no host list -> refuse
 if /src/scripts/tf_sandbox.sh setup "$HOME/work/repo" 2>/dev/null; then echo "FAIL: setup ran without a host list"; fail=1; fi
 SANDBOX_EGRESS_HOSTS="$RUNNER_TEMP/egress-hosts.txt" /src/scripts/tf_sandbox.sh setup "$HOME/work/repo"
-out=$(/src/scripts/tf_sandbox.sh run infra probe 2>&1 || true)
+out=$(SANDBOX_FAIL_ON_REFUSED=0 /src/scripts/tf_sandbox.sh run infra probe 2>&1 || true)
 while IFS= read -r l; do echo "  sandbox: $l"; done <<< "$out"
 for s in oidc-request-secret-123 runtime-secret-456 ghs-secret-789 step-script-secret gitsecret; do
   if grep -q "$s" <<< "$out"; then echo "FAIL: sandbox saw $s"; fail=1; fi
@@ -46,6 +46,13 @@ if [ "${SANDBOX_TEST_OFFLINE:-}" != 1 ]; then
   grep -q "PROXY-AWS-OK" <<< "$out" || { echo "FAIL: AWS endpoint not reachable through the proxy"; fail=1; }
 fi
 /src/scripts/tf_sandbox.sh egress-report
+# Fail fast: with the default watchdog, a refused connection stops terraform (exit 3) quickly.
+start=$(date +%s)
+rc=0; msg=$(/src/scripts/tf_sandbox.sh run infra hang 2>&1) || rc=$?
+took=$(( $(date +%s) - start ))
+[ "$rc" = 3 ] && grep -q "egress policy missing hosts" <<< "$msg" && [ "$took" -lt 30 ] \
+  || { echo "FAIL: watchdog did not stop a refused-egress run (rc=$rc, ${took}s)"; fail=1; }
+/src/scripts/tf_sandbox.sh egress-check >/dev/null 2>&1 && { echo "FAIL: egress-check passed with refusals"; fail=1; }
 # export keeps links as links
 /src/scripts/tf_sandbox.sh export "$HOME/work/out"
 [ -L "$HOME/work/out/infra/evil-link" ] || { echo "FAIL: symlink not preserved as link"; fail=1; }

@@ -111,6 +111,9 @@ box and runs without approval, so nothing in it may widen egress or redirect sta
   and anything in a second region, e.g. an `aws.us_east_1` alias: `acm.us-east-1.amazonaws.com`
   and `sts.us-east-1.amazonaws.com`.
 - `buckets`: every bucket the code manages or reads (dot-free names); the state bucket is added.
+- Derived from `account_id`, own account only: `<account>.ddb.<region>.amazonaws.com` when
+  `dynamodb` is listed (SDK account-based endpoints) and `<account>.s3-control.<region>.amazonaws.com`
+  when there are buckets (bucket tags via S3 Control in AWS provider 6.x).
 - `s3_path_style`: keep false. The path-style host serves every bucket, attacker-owned ones too.
 
 The pipeline refuses a repo without a file, a file for another repository, unknown fields,
@@ -119,8 +122,23 @@ Caller inputs `aws_region`, `aws_account_id` and the optional `state_bucket` mus
 the file; the backend always uses the file's bucket and region (`-backend-config`).
 
 **Onboarding a repo = a pull request to deploy-workflows, made and merged by Tobi**, adding its
-policy file. A missing endpoint shows up as a failed plan and a non-zero "refused" count in the
-"Sandbox egress" step (hostnames are never logged): extend the file in another PR.
+policy file. A missing endpoint fails the job at the "Sandbox egress" step ("egress policy
+missing hosts", with the refused count; hostnames are never logged). A watchdog
+stops Terraform as soon as the proxy refuses a connection (the AWS provider otherwise retries a
+refused endpoint for half an hour: its `max_retries` of 25 ignores `AWS_MAX_ATTEMPTS`, which the
+sandbox still sets to 2 with `AWS_RETRY_MODE=standard`), and the plan and apply jobs time out
+after 20 minutes.
+
+To list the missing hosts, run the plan locally (never in CI) with a read-only profile:
+
+```bash
+tests/sandbox/local-plan.sh ~/GitHub/<repo> <tf_dir> tobipjuk/<repo> <aws-profile>
+```
+
+It runs the real `terraform plan -lock=false` in the same sandbox and proxy in a throwaway
+container, with the policy's host list, and prints the ALLOWED/REFUSED hostnames from a private
+file (`SANDBOX_DEBUG_HOSTS_FILE`, refused when `GITHUB_ACTIONS=true`). Add what's legitimate to
+the policy; never a path-style S3, `execute-api` or `elb` host.
 
 Requirements on the project's Terraform:
 

@@ -15,9 +15,12 @@ box-writable plan.yml/deploy.yml) are only checked for agreement; they never add
 
 Produces (one per line):
   - sts.<region>.amazonaws.com (always: credentials/account checks)
-  - <service>.<region>.amazonaws.com for each --services name (regional API endpoints)
+  - <service>.<region>.amazonaws.com for each --services name (regional API endpoints), and for
+    dynamodb also <account_id>.ddb.<region>.amazonaws.com (SDK account-based endpoint)
   - each --global-hosts entry (global or us-east-1 API endpoints, e.g. iam.amazonaws.com,
     cloudfront.amazonaws.com, route53.amazonaws.com, acm.us-east-1.amazonaws.com)
+  - <account_id>.s3-control.<region>.amazonaws.com when the project has buckets (S3 Control:
+    bucket tags in AWS provider 6.x; account-scoped, own account only)
   - <bucket>.s3.<region>.amazonaws.com and <bucket>.s3.amazonaws.com for the state bucket (in
     --state-region) and each --buckets name (virtual-hosted style)
   - with --s3-path-style only: s3.<region>.amazonaws.com. Off by default: a CONNECT proxy sees
@@ -49,7 +52,8 @@ def words(s):
     return [w for w in re.split(r"[\s,]+", s or "") if w]
 
 
-def build(region, state_bucket, services, global_hosts=(), buckets=(), state_region=None, s3_path_style=False):
+def build(region, state_bucket, services, global_hosts=(), buckets=(), state_region=None, s3_path_style=False,
+          account_id=None):
     if not REGION.match(region or ""):
         raise HostError(f"bad region {region!r}")
     state_region = state_region or region
@@ -62,12 +66,23 @@ def build(region, state_bucket, services, global_hosts=(), buckets=(), state_reg
         if not SERVICE.match(svc) or FORBIDDEN_SERVICE.match(svc):
             raise HostError(f"service {svc!r} is not allowed (S3 goes through buckets; no execute-api/elb)")
         hosts.add(f"{svc}.{region}.amazonaws.com")
+        if svc == "dynamodb" and account_id:
+            # AWS SDK v2 account-based endpoints (seen on the first ICE plan): pinned to the
+            # project's own account id, so not attacker-ownable.
+            if not re.fullmatch(r"[0-9]{12}", str(account_id)):
+                raise HostError("bad account id")
+            hosts.add(f"{account_id}.ddb.{region}.amazonaws.com")
     for h in global_hosts:
         h = h.lower().rstrip(".")
         m = GLOBAL_HOST.match(h)
         if not m or FORBIDDEN_SERVICE.match(m.group(1)):
             raise HostError(f"global host {h!r} is not an allowed API endpoint")
         hosts.add(h)
+    if buckets and account_id:
+        # S3 Control (bucket tags in AWS provider 6.x), account-scoped host: own account only.
+        if not re.fullmatch(r"[0-9]{12}", str(account_id)):
+            raise HostError("bad account id")
+        hosts.add(f"{account_id}.s3-control.{region}.amazonaws.com")
     for b, r in [(state_bucket, state_region)] + [(b, region) for b in buckets]:
         if not BUCKET.match(b or "") or ".." in b or "." in b:
             raise HostError(f"bucket {b!r} is not a valid dot-free S3 bucket name")
@@ -130,7 +145,7 @@ def main(argv=None):
         if args.expect_account != str(pol["account_id"]):
             raise HostError("aws_account_id input differs from the trusted policy")
         hosts = build(pol["region"], pol["state_bucket"], pol["services"], pol["global_hosts"],
-                      pol["buckets"], pol["state_region"], pol["s3_path_style"])
+                      pol["buckets"], pol["state_region"], pol["s3_path_style"], str(pol["account_id"]))
     except HostError as e:
         print(f"::error::egress policy: {e}", file=sys.stderr)
         return 1
