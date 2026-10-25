@@ -69,6 +69,14 @@ Every 60 s, for each registered repo:
      (an extra job could replace artifacts or call tf-attest.yml on artifacts of its own, see 4a;
      names alone are spoofable, the count, success and references carry the check; re-run
      plans are refused);
+   - **Exception, no plan bundle:** tf-plan runs its attest job only when it uploaded a plan
+     bundle. When the plan has no changes, or the project has no deploy role, the run has
+     exactly two jobs over all attempts: ` / terraform plan` completed/success, and the skipped
+     nested call listed at caller level only (a name ending in ` / attest`, completed/skipped).
+     Accept this shape only if the run has **no** `plan-bundle` and **no** `plan-attestation`
+     artifact. Then go on with §4.1: no `plan-summary` = no changes (mark handled, no message);
+     `plan-summary` = plan only (info message, no buttons). Any other skipped, failed or extra
+     job, or a bundle or attestation next to a skipped attest job, is a refusal.
    - `head_sha` equals main's current head: `GET /repos/{o}/{r}/branches/main` → `commit.sha`;
    - age: `now - run_started_at < 2 h` (use the API's timestamp, not the summary's).
 4. A newer accepted plan for the same repo **supersedes** any older pending one: edit the older
@@ -82,7 +90,8 @@ Rate: 3 API calls per repo per minute is far inside the App's 5,000/h.
    `name == "plan-bundle"` and `name == "plan-attestation"`, all with `expired == false`
    (exactly one of each name; duplicates = refuse). No `plan-summary` = the plan had no
    changes: mark handled, no message. `plan-summary` but no `plan-bundle` = project has no deploy
-   role: mark handled, optionally send an info message without buttons.
+   role: mark handled, optionally send an info message without buttons (the attest job is
+   skipped in both cases, see §3).
 2. `GET {archive_download_url}` (302 to a short-lived blob URL; follow it **without** forwarding
    the Authorization header). It is a zip: refuse if > 1 MB, if it holds anything other than one
    member `plan-summary.json`, or if that member is > 2 MB uncompressed.

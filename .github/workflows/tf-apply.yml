@@ -380,25 +380,18 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/checks"
           echo failed > "$RUNNER_TEMP/checks/invalidation"
+          names=$(python3 -I "$TOOLS/scripts/invalidate_plan.py" --lines "$INVALIDATE" \
+            --addresses "$RUNNER_TEMP/changed-addresses.txt")
           ids=()
-          while IFS= read -r line; do
-            line=$(printf '%s' "$line" | xargs)
-            [ -n "$line" ] || continue
-            if [[ "$line" =~ ^([A-Za-z0-9_]+)([[:space:]]+if[[:space:]]+([A-Za-z0-9_.\"\[\]-]+))?$ ]]; then
-              out=${BASH_REMATCH[1]}; prefix=${BASH_REMATCH[3]}
-            else
-              echo "::error::Bad invalidate line: $line"; exit 1
-            fi
-            if [ -n "$prefix" ] && ! grep -qF -- "$prefix" <(cut -c1-"${#prefix}" "$RUNNER_TEMP/changed-addresses.txt"); then
-              echo "skip $out (no change under $prefix)"; continue
-            fi
+          while IFS= read -r out; do
+            [ -n "$out" ] || continue
             dist=$(bash "$TOOLS/scripts/tf_sandbox.sh" run "$TF_DIR" output -raw "$out")
             [[ "$dist" =~ ^E[A-Z0-9]{5,20}$ ]] || { echo "::error::Output $out is not a distribution id"; exit 1; }
             inv=$(aws cloudfront create-invalidation --distribution-id "$dist" --paths '/*' \
               --query Invalidation.Id --output text)
             echo "$out $dist $inv"
             ids+=("$out:$dist:$inv")
-          done <<< "$INVALIDATE"
+          done <<< "$names"
           deadline=$(( $(date +%s) + 900 ))
           pending=("${ids[@]}")
           while [ "${#pending[@]}" -gt 0 ] && [ "$(date +%s)" -lt "$deadline" ]; do
