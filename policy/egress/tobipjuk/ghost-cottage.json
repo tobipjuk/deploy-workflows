@@ -1,0 +1,12 @@
+{
+ "schema": 1,
+ "repository": "tobipjuk/ghost-cottage",
+ "account_id": "824015588710",
+ "region": "eu-west-2",
+ "state_bucket": "ghost-cottage-tfstate-824015588710",
+ "state_region": "eu-west-2",
+ "services": ["sts"],
+ "global_hosts": ["cloudfront.amazonaws.com"],
+ "buckets": ["ghost-cottage-site-824015588710"],
+ "s3_path_style": false
+}
