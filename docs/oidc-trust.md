@@ -62,9 +62,11 @@ token matches nothing, which fails closed but is noisy). Order per repo:
 
 3. Push or dispatch `plan.yml` and read the printed `OIDC sub` line.
 
-If the API rejects `run_attempt` (422), drop it from the list, set
-`sub_includes_run_attempt = false` in the CI stack and re-apply. tf-apply.yml still refuses
-re-runs (`run_attempt == 1`, actor == triggering actor), but only in the workflow.
+`run_attempt` in the sub is **required**; there is no fallback. Without it, a re-run of an
+approved deploy run (re-runs keep `actor` = the App, and anyone with write access to the repo,
+including the box, can re-run) would get deploy credentials again. If the API ever rejects the
+template (422), stop: don't drop the claim, don't loosen the trust, keep deploys manual and
+redesign. (The module has no switch for it on purpose.)
 
 Rollback: `{"use_default": true}` restores `repo:<o>/<r>:ref:refs/heads/main` subjects (the
 roles then accept nothing until their trust is changed back too).

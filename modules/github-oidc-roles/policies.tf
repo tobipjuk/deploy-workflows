@@ -10,9 +10,15 @@ locals {
   private_bucket_arns = [for b in var.private_bucket_names : "arn:${local.partition}:s3:::${b}"]
   private_object_arns = [for b in var.private_bucket_names : "arn:${local.partition}:s3:::${b}/*"]
 
-  zone_arns         = [for z in var.dns_zones : "arn:${local.partition}:route53:::hostedzone/${z.zone_id}"]
-  protected_txt     = distinct(concat([for z in var.dns_zones : lower(z.apex)], [for n in var.protected_txt_names : lower(n)]))
-  source_fn_pattern = "arn:${local.partition}:lambda:${var.region}:${local.acct}:function:${local.p}-*"
+  zone_arns = [for z in var.dns_zones : "arn:${local.partition}:route53:::hostedzone/${z.zone_id}"]
+  # Route 53 condition keys carry normalised names: lowercase, no trailing dot. Normalise the
+  # inputs the same way, or an FQDN like "example.com." would make the denies match nothing.
+  protected_txt = distinct(concat(
+    [for z in var.dns_zones : trimsuffix(lower(trimspace(z.apex)), ".")],
+    [for n in var.protected_txt_names : trimsuffix(lower(trimspace(n)), ".")],
+  ))
+  protected_patterns = distinct([for n in var.protected_record_name_patterns : trimsuffix(lower(trimspace(n)), ".")])
+  source_fn_pattern  = "arn:${local.partition}:lambda:${var.region}:${local.acct}:function:${local.p}-*"
 
   # ---- CI boundary: the ceiling ----------------------------------------------------------
   ci_boundary_policy = jsonencode({
@@ -128,13 +134,13 @@ locals {
           }
         }
       },
-      ], length(local.zone_arns) == 0 || length(var.protected_record_name_patterns) == 0 ? [] : [
+      ], length(local.zone_arns) == 0 || length(local.protected_patterns) == 0 ? [] : [
       {
         Sid       = "DenyProtectedRecordNames"
         Effect    = "Deny"
         Action    = ["route53:ChangeResourceRecordSets"]
         Resource  = local.zone_arns
-        Condition = { "ForAnyValue:StringLike" = { "route53:ChangeResourceRecordSetsNormalizedRecordNames" = var.protected_record_name_patterns } }
+        Condition = { "ForAnyValue:StringLike" = { "route53:ChangeResourceRecordSetsNormalizedRecordNames" = local.protected_patterns } }
       },
     ])
   })

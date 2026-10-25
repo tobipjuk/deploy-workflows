@@ -64,12 +64,6 @@ variable "approver_app_slug" {
   }
 }
 
-variable "sub_includes_run_attempt" {
-  description = "The repo's OIDC sub template includes run_attempt (deploy role then trusts run_attempt 1 only: no re-runs). Must match the gh api customisation."
-  type        = bool
-  default     = true
-}
-
 variable "create_oidc_provider" {
   description = "true = create GitHub's OIDC provider; false = reuse the account's existing one (aws iam list-open-id-connect-providers)."
   type        = bool
@@ -127,6 +121,10 @@ variable "dns_zones" {
     apex    = string
   }))
   default = []
+  validation {
+    condition     = alltrue([for z in var.dns_zones : can(regex("^[A-Za-z0-9.-]+\\.?$", trimspace(z.apex))) && can(regex("^Z[A-Z0-9]+$", z.zone_id))])
+    error_message = "dns_zones: apex must be a DNS name (a trailing dot is fine, it is stripped) and zone_id a Route 53 zone id."
+  }
 }
 
 variable "protected_txt_names" {

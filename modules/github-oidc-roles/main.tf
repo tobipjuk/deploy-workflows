@@ -50,17 +50,16 @@ locals {
   # --- OIDC subjects ---------------------------------------------------------------------
   # Repo-level template (docs/oidc-trust.md): include_claim_keys in this order. GitHub renders
   # each claim as key:value joined by ':' (context renders as ref:refs/heads/<branch>), and
-  # encodes ':' inside values as %3A.
-  sub_claim_keys = var.sub_includes_run_attempt ? ["repo", "context", "event_name", "actor", "run_attempt", "job_workflow_ref"] : ["repo", "context", "event_name", "actor", "job_workflow_ref"]
+  # encodes ':' inside values as %3A. run_attempt is REQUIRED: the deploy role trusts attempt 1
+  # only, so a re-run of an approved deploy (which keeps actor = the App) gets no credentials.
+  sub_claim_keys = ["repo", "context", "event_name", "actor", "run_attempt", "job_workflow_ref"]
 
   wf_prefix        = "${var.deploy_workflows_repo}/.github/workflows"
   plan_wf_ref      = "${local.wf_prefix}/tf-plan.yml@${var.deploy_workflows_ref}"
   apply_wf_ref     = "${local.wf_prefix}/tf-apply.yml@${var.deploy_workflows_ref}"
   sub_head         = "repo:${var.github_repo}:ref:refs/heads/${var.github_branch}"
-  plan_attempt     = var.sub_includes_run_attempt ? ":run_attempt:*" : ""
-  plan_subjects    = [for ev in ["push", "workflow_dispatch"] : "${local.sub_head}:event_name:${ev}:actor:*${local.plan_attempt}:job_workflow_ref:${local.plan_wf_ref}"]
-  deploy_attempt   = var.sub_includes_run_attempt ? ":run_attempt:1" : ""
-  deploy_subject   = var.approver_app_slug == null ? null : "${local.sub_head}:event_name:workflow_dispatch:actor:${var.approver_app_slug}[bot]${local.deploy_attempt}:job_workflow_ref:${local.apply_wf_ref}"
+  plan_subjects    = [for ev in ["push", "workflow_dispatch"] : "${local.sub_head}:event_name:${ev}:actor:*:run_attempt:*:job_workflow_ref:${local.plan_wf_ref}"]
+  deploy_subject   = var.approver_app_slug == null ? null : "${local.sub_head}:event_name:workflow_dispatch:actor:${var.approver_app_slug}[bot]:run_attempt:1:job_workflow_ref:${local.apply_wf_ref}"
   read_only_policy = "arn:${local.partition}:iam::aws:policy/ReadOnlyAccess"
 }
 

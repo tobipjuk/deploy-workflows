@@ -105,6 +105,12 @@ jobs:
     outputs:
       result: ${{ steps.result.outputs.result }}
     steps:
+      # NOT A SECURITY BOUNDARY: none of the workflow-level checks below (actor, attempt, event,
+      # ref, input formats) nor any `with:` input is what stops an unapproved deploy; a caller
+      # or a modified run can't be trusted to keep them. The ONLY boundary is the AWS OIDC trust
+      # of the deploy role: an exact StringEquals on the sub (repo, ref main, workflow_dispatch,
+      # actor <app>[bot], run_attempt 1, job_workflow_ref tf-apply.yml@main). These checks exist
+      # to fail early and readably, and as defence in depth.
       - name: Check the dispatch
         env:
           APP_SLUG: ${{ inputs.approver_app_slug }}

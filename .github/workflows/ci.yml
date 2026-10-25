@@ -43,3 +43,4 @@ jobs:
           cd modules/github-oidc-roles
           terraform init -backend=false -input=false
           terraform validate
+          terraform test

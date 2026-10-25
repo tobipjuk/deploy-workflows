@@ -157,6 +157,20 @@ provider allowlist before `init`, provisioner/external-program refusal, plan run
 - **Write access to this repo.** Anyone who can push to deploy-workflows' `main` controls
   every deploy. The box's GitHub token must not reach this repo (fine-grained token without
   it), `main` here gets a ruleset (no force-push, no deletion), and changes are reviewed.
+- **An approved plan can create a Lambda role with an attacker-chosen trust policy.** CI may
+  create roles under `/<p>-lambda/` (that is how Lambda roles are managed), and IAM has no
+  condition key for a new role's trust policy. The Lambda boundary caps what such a role can
+  do (data plane only, and nothing outside the project's own functions via
+  `lambda:SourceFunctionArn`), but `logs:*` writes and `kms:Decrypt`/`GenerateDataKey*` are exempt
+  from that source-function deny (still bounded by the boundary's allows). So, again,
+  **approving a commit means trusting it**. Turn on IAM Access Analyzer (see "Monitoring"): it
+  flags a role trusting anything outside the account.
+- **Trust changes on existing Lambda roles are human applies.** `iam:UpdateAssumeRolePolicy` is
+  denied to CI outright (the boundary condition can't guard it), so a plan that changes a Lambda
+  role's `assume_role_policy` fails at apply: apply it by hand with SSO.
+- **Never widen the plan role's reads to secrets.** Don't add `ssm:Get*` (or other secret reads)
+  to `read_actions` while `plan_deny_kms_decrypt = false`: with Decrypt allowed, that would let
+  every box-written plan read SecureStrings.
 - **GitHub itself** (Actions, OIDC issuer, artifact storage) is trusted.
 - **ReadOnlyAccess on both roles**, capped by the boundary: control-plane reads of the
   project's services in the account (other projects' resource *metadata* in a shared account
@@ -256,7 +270,7 @@ Not built yet; the module's trust and guardrails apply unchanged (boundary state
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 actionlint .github/workflows/*.yml
 terraform fmt -check -recursive modules
-(cd modules/github-oidc-roles && terraform init -backend=false && terraform validate)
+(cd modules/github-oidc-roles && terraform init -backend=false && terraform validate && terraform test)
 ```
 
 CI (`.github/workflows/ci.yml`) runs the same. Changes to `main` here change every project's
