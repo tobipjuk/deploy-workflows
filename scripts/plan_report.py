@@ -44,7 +44,7 @@ MAX_SUMMARY_LINES = 200
 HIDDEN_NAME = re.compile(
     r"(secret|password|passwd|token|pepper|salt|private|credential|api_?key|access_?key|auth"
     r"|cookie|session|signature|certificate_(body|chain)|^content(_base64)?$|^variables$"
-    r"|user_data|_wo$|^value$)",
+    r"|user_data|_wo$|^value$|(^|_)policy$|^records$|^body$|^definition$)",
     re.IGNORECASE,
 )
 
@@ -101,9 +101,25 @@ def _mask_at(mask, key):
     return False
 
 
+URL = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*://)([^/?#@]*@)?([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$")
+
+
+def sanitize_url(v):
+    """Drop userinfo, query and fragment from URL-looking strings: they are where secrets ride
+    (https://user:pass@host/?token=...). Host and path stay visible."""
+    if not isinstance(v, str):
+        return v
+    m = URL.match(v.strip())
+    if not m:
+        return v
+    scheme, userinfo, host, path, query, frag = m.groups()
+    return (scheme + ("…@" if userinfo else "") + host + path + ("?…" if query else "")
+            + ("#…" if frag else ""))
+
+
 def _render(v):
     if isinstance(v, str):
-        s = json.dumps(v, ensure_ascii=False)
+        s = json.dumps(sanitize_url(v), ensure_ascii=False)
     elif v is None or isinstance(v, (bool, int, float)):
         s = json.dumps(v)
     else:
@@ -165,6 +181,9 @@ BUCKET_CONFIG = re.compile(r"^aws_s3_bucket_(policy|acl|public_access_block|owne
                            r"|website_configuration|replication_configuration|notification|logging"
                            r"|server_side_encryption_configuration|versioning|lifecycle_configuration)$")
 # (resource type, attribute path, label, show the value?)
+# show=True only for paths that name things (hosts, principals, ARNs, auth types); URLs among them
+# lose userinfo/query/fragment (sanitize_url). Policy documents, env vars and record values are
+# never shown, and Terraform's sensitivity masks always win ("(hidden)").
 ATTENTION_RULES = [
     (re.compile(r"^aws_apigatewayv2_integration$"), re.compile(r"^integration_uri$"), "API integration target", True),
     (re.compile(r"^aws_api_gateway_integration$"), re.compile(r"^uri$"), "API integration target", True),
@@ -176,7 +195,9 @@ ATTENTION_RULES = [
     (re.compile(r"^aws_iam_role$"), re.compile(r"^assume_role_policy$"), "role trust policy", False),
     (re.compile(r"^aws_iam_(role_policy|policy)$"), re.compile(r"^policy$"), "IAM policy document", False),
     (re.compile(r"^aws_iam_role_policy_attachment$"), re.compile(r"^policy_arn$"), "managed policy attached", True),
-    (re.compile(r"^aws_route53_record$"), re.compile(r"^(name|type|records\[\d+\]|alias\[0\]\.name)$"), "DNS record", True),
+    (re.compile(r"^aws_route53_record$"), re.compile(r"^(name|type|alias\[0\]\.name)$"), "DNS record", True),
+    # TXT and other record values can carry anything: flagged, value not shown.
+    (re.compile(r"^aws_route53_record$"), re.compile(r"^records\[\d+\]$"), "DNS record value", False),
     (re.compile(r"^aws_sns_topic_subscription$"), re.compile(r"^(endpoint|protocol)$"), "SNS subscription", True),
     (re.compile(r"^aws_lambda_function$"), re.compile(r"^environment\[0\]\.variables\..+$"),
      "Lambda environment variable", False),
@@ -221,7 +242,7 @@ def _att_value(path, v, show):
     # policy documents and env vars are never shown here.
     if not show:
         return "(changed, value not shown)"
-    s = v if isinstance(v, str) else json.dumps(v)
+    s = sanitize_url(v) if isinstance(v, str) else json.dumps(v)
     return s if len(s) <= MAX_ATTENTION_VALUE else s[: MAX_ATTENTION_VALUE - 1] + "…"
 
 

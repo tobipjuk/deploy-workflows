@@ -2,18 +2,23 @@
 """Egress allowlist proxy for the Terraform sandbox (Guardian M2). Stdlib only.
 
 The sandbox user's traffic is dropped by iptables except to this proxy (scripts/tf_sandbox.sh),
-and Terraform/providers reach it through HTTPS_PROXY. Only `CONNECT host:443` to allowlisted
-hostnames is relayed: AWS endpoints and the Terraform registry/releases (provider downloads at
-init). DNS is not available to the sandbox at all; the proxy resolves, and refuses names that
+and Terraform/providers reach it through HTTPS_PROXY. Only `CONNECT host:443` to an EXACT host
+list is relayed: the project's AWS endpoints and buckets (scripts/egress_hosts.py, one host per
+line in --hosts-file) plus the Terraform registry/releases hosts (provider downloads at init).
+No wildcards: `*.amazonaws.com` includes attacker-ownable hosts (S3 buckets, execute-api, elb). DNS is not available to the sandbox at all; the proxy resolves, and refuses names that
 resolve to private, loopback, link-local or otherwise non-global addresses (no IMDS, no runner
 services). Hostnames are never logged (a refused name could carry a secret into the job log);
 only counts go to the stats file.
 
-  egress_proxy.py --port 3128 --stats FILE
+  egress_proxy.py --port 3128 --hosts-file FILE --stats FILE --ready-file FILE
+
+--ready-file is written (with this process's pid) only after the listening socket is bound, so
+the caller can tell its own proxy from anything else on the port.
 """
 import argparse
 import ipaddress
 import json
+import os
 import re
 import select
 import socket
@@ -21,11 +26,9 @@ import socketserver
 import sys
 import threading
 
-ALLOWED_HOSTS = [
-    re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+amazonaws\.com$"),
-    re.compile(r"^registry\.terraform\.io$"),
-    re.compile(r"^releases\.hashicorp\.com$"),
-]
+FIXED_HOSTS = frozenset({"registry.terraform.io", "releases.hashicorp.com"})
+HOST_LINE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+_allowed = set(FIXED_HOSTS)
 MAX_HEADER = 8192
 IDLE_TIMEOUT = 300
 
@@ -34,9 +37,24 @@ _lock = threading.Lock()
 _stats_path = None
 
 
-def host_allowed(host):
+def load_hosts(path):
+    hosts = set()
+    with open(path, encoding="ascii") as f:
+        for line in f:
+            h = line.strip().lower()
+            if not h or h.startswith("#"):
+                continue
+            if not HOST_LINE.match(h) or len(h) > 253:
+                raise ValueError(f"bad host line {h!r}")
+            hosts.add(h)
+    if not hosts:
+        raise ValueError("empty host list")
+    return hosts
+
+
+def host_allowed(host, allowed=None):
     host = host.lower().rstrip(".")
-    return len(host) <= 253 and any(p.match(host) for p in ALLOWED_HOSTS)
+    return host in (_allowed if allowed is None else allowed)
 
 
 def global_address(ip):
@@ -132,17 +150,32 @@ class Server(socketserver.ThreadingTCPServer):
 
 
 def main(argv=None):
-    global _stats_path
+    global _stats_path, _allowed
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=3128)
+    ap.add_argument("--hosts-file", required=True)
     ap.add_argument("--stats")
+    ap.add_argument("--ready-file")
     args = ap.parse_args(argv)
+    try:
+        _allowed = load_hosts(args.hosts_file) | FIXED_HOSTS
+    except (OSError, ValueError) as e:
+        print(f"egress proxy: {e}", file=sys.stderr)
+        return 1
     _stats_path = args.stats
     if _stats_path:
         with open(_stats_path, "w") as f:
             json.dump(_stats, f)
-    with Server(("127.0.0.1", args.port), Handler) as srv:
-        print(f"egress proxy on 127.0.0.1:{args.port}", flush=True)
+    try:
+        srv = Server(("127.0.0.1", args.port), Handler)
+    except OSError as e:
+        print(f"egress proxy: cannot bind 127.0.0.1:{args.port}: {e.strerror}", file=sys.stderr)
+        return 1
+    with srv:
+        if args.ready_file:
+            with open(args.ready_file, "w") as f:
+                f.write(f"{os.getpid()}\n")
+        print(f"egress proxy on 127.0.0.1:{args.port}, {len(_allowed)} hosts", flush=True)
         srv.serve_forever()
 
 

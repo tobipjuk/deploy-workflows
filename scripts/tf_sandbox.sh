@@ -23,8 +23,9 @@
 # Egress (Guardian M2): setup starts scripts/egress_proxy.py (as the runner user) on
 # 127.0.0.1:$SANDBOX_PROXY_PORT and adds iptables/ip6tables rules that REJECT every packet from
 # the sandbox uid except TCP to that port (no DNS, no IMDS, no direct internet). The proxy only
-# relays CONNECT :443 to *.amazonaws.com, registry.terraform.io and releases.hashicorp.com.
-# Setup fails (closed) if the firewall can't be installed.
+# relays CONNECT :443 to the EXACT hosts in $SANDBOX_EGRESS_HOSTS (scripts/egress_hosts.py) plus
+# registry.terraform.io and releases.hashicorp.com. Setup fails (closed) if the host list is
+# missing, the proxy can't bind, or the firewall can't be installed.
 set -euo pipefail
 
 SANDBOX_USER=${SANDBOX_USER:-tfsandbox}
@@ -55,15 +56,22 @@ case "$cmd" in
     if [ -d "$HOME/.aws" ]; then sudo cp -a "$HOME/.aws" "$SANDBOX_HOME/.aws"; fi
     sudo chown -R -h "$SANDBOX_USER:$SANDBOX_USER" "$SANDBOX_HOME"
     sudo chmod 0700 "$SANDBOX_HOME"
-    # Egress: proxy first, then the firewall (idempotent: rules are added once per uid).
-    if ! (exec 3<>"/dev/tcp/127.0.0.1/$SANDBOX_PROXY_PORT") 2>/dev/null; then
-      nohup python3 -I "$HERE/egress_proxy.py" --port "$SANDBOX_PROXY_PORT" --stats "$STATS" \
-        >/dev/null 2>&1 &
-      for _ in $(seq 1 50); do
-        (exec 3<>"/dev/tcp/127.0.0.1/$SANDBOX_PROXY_PORT") 2>/dev/null && break
-        sleep 0.1
-      done
-      (exec 3<>"/dev/tcp/127.0.0.1/$SANDBOX_PROXY_PORT") 2>/dev/null || die "egress proxy did not start"
+    # Egress: our own proxy, started here (never trust whatever already listens on the port),
+    # then the firewall. The proxy writes its pid to the ready file only after binding.
+    hosts=${SANDBOX_EGRESS_HOSTS:-}
+    [ -n "$hosts" ] && [ -s "$hosts" ] || die "SANDBOX_EGRESS_HOSTS (exact egress host list) is not set: refusing"
+    ready="${RUNNER_TEMP:-/tmp}/tf-sandbox-proxy.ready"
+    rm -f "$ready"
+    nohup python3 -I "$HERE/egress_proxy.py" --port "$SANDBOX_PROXY_PORT" --hosts-file "$hosts" \
+      --stats "$STATS" --ready-file "$ready" >/dev/null 2>"${RUNNER_TEMP:-/tmp}/tf-sandbox-proxy.err" &
+    proxy_pid=$!
+    for _ in $(seq 1 100); do
+      [ -s "$ready" ] && break
+      kill -0 "$proxy_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if ! { [ -s "$ready" ] && [ "$(cat "$ready")" = "$proxy_pid" ] && kill -0 "$proxy_pid" 2>/dev/null; }; then
+      die "egress proxy did not start ($(head -c 200 "${RUNNER_TEMP:-/tmp}/tf-sandbox-proxy.err" 2>/dev/null))"
     fi
     uid=$(id -u "$SANDBOX_USER")
     for ipt in iptables ip6tables; do

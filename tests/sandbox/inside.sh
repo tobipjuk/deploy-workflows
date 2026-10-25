@@ -13,10 +13,22 @@ echo 'resource "x" "y" {}' > "$HOME/work/repo/infra/main.tf"
 mkdir -p "$HOME/work/repo/.git" && echo gitsecret > "$HOME/work/repo/.git/config"
 chmod 0755 "$HOME"   # like a permissive runner image; setup must close it
 
-/src/scripts/tf_sandbox.sh setup "$HOME/work/repo"
+export RUNNER_TEMP="$HOME/work/_temp"
+printf 'sts.amazonaws.com\n' > "$RUNNER_TEMP/egress-hosts.txt"
+fail=0
+# LOW-1: something else already on the proxy port -> setup must refuse, not trust it
+python3 -c 'import socket,time; s=socket.socket(); s.bind(("127.0.0.1",3128)); s.listen(5); time.sleep(30)' &
+squatter=$!
+sleep 1
+if SANDBOX_EGRESS_HOSTS="$RUNNER_TEMP/egress-hosts.txt" /src/scripts/tf_sandbox.sh setup "$HOME/work/repo" 2>/dev/null; then
+  echo "FAIL: setup trusted a foreign listener on the proxy port"; fail=1
+fi
+kill "$squatter"; wait "$squatter" 2>/dev/null || true
+# no host list -> refuse
+if /src/scripts/tf_sandbox.sh setup "$HOME/work/repo" 2>/dev/null; then echo "FAIL: setup ran without a host list"; fail=1; fi
+SANDBOX_EGRESS_HOSTS="$RUNNER_TEMP/egress-hosts.txt" /src/scripts/tf_sandbox.sh setup "$HOME/work/repo"
 out=$(/src/scripts/tf_sandbox.sh run infra probe 2>&1 || true)
 while IFS= read -r l; do echo "  sandbox: $l"; done <<< "$out"
-fail=0
 for s in oidc-request-secret-123 runtime-secret-456 ghs-secret-789 step-script-secret gitsecret; do
   if grep -q "$s" <<< "$out"; then echo "FAIL: sandbox saw $s"; fail=1; fi
 done
@@ -24,7 +36,7 @@ grep -q "PWD-OK infra" <<< "$out" || { echo "FAIL: terraform did not run in the 
 grep -q "AWSCREDS-OK" <<< "$out" || { echo "FAIL: sandbox lacks the AWS profile"; fail=1; }
 grep -q "REGION eu-west-2" <<< "$out" || { echo "FAIL: AWS_REGION not passed"; fail=1; }
 grep -q "SUDO-DENIED" <<< "$out" || { echo "FAIL: sandbox could sudo"; fail=1; }
-for want in EGRESS-DIRECT-BLOCKED DNS-BLOCKED PROXY-FOREIGN-BLOCKED PROXY-IMDS-BLOCKED; do
+for want in EGRESS-DIRECT-BLOCKED DNS-BLOCKED PROXY-FOREIGN-BLOCKED PROXY-IMDS-BLOCKED PROXY-UNLISTED-AWS-BLOCKED; do
   grep -q "$want" <<< "$out" || { echo "FAIL: expected $want"; fail=1; }
 done
 if [ "${SANDBOX_TEST_OFFLINE:-}" != 1 ]; then

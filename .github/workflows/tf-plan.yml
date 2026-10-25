@@ -52,6 +52,29 @@ on:
         description: Overrides the S3 backend bucket (empty = as configured in the code)
         type: string
         default: ""
+      egress_services:
+        description: >-
+          Required. Regional AWS API endpoint names the Terraform code calls, space/newline separated
+          (e.g. "lambda dynamodb logs ssm sns events monitoring apigateway email"); each becomes
+          <name>.<aws_region>.amazonaws.com. Not s3*/execute-api/elb (see scripts/egress_hosts.py).
+        type: string
+        required: true
+      egress_global_hosts:
+        description: Exact global/us-east-1 API hosts (e.g. "iam.amazonaws.com cloudfront.amazonaws.com route53.amazonaws.com acm.us-east-1.amazonaws.com")
+        type: string
+        default: ""
+      egress_buckets:
+        description: The project's own S3 buckets Terraform reads/writes (virtual-hosted hosts are allowed for these and the state bucket only)
+        type: string
+        default: ""
+      egress_s3_path_style:
+        description: Also allow s3.<region>.amazonaws.com (serves every bucket, attacker-owned ones too). Leave false unless a plan needs it.
+        type: boolean
+        default: false
+      state_region:
+        description: Region of the state bucket if not aws_region
+        type: string
+        default: ""
       terraform_version:
         type: string
         default: "1.17.0"
@@ -156,9 +179,29 @@ jobs:
 
       # Project Terraform runs as user tfsandbox with a scrubbed environment: it can't read the
       # OIDC request credentials, the runtime token or the runner's files (scripts/tf_sandbox.sh).
+      - name: Egress allowlist for the sandbox
+        env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
+          REGION: ${{ inputs.aws_region }}
+          STATE_BUCKET: ${{ inputs.state_bucket }}
+          STATE_REGION: ${{ inputs.state_region }}
+          SERVICES: ${{ inputs.egress_services }}
+          GLOBAL_HOSTS: ${{ inputs.egress_global_hosts }}
+          BUCKETS: ${{ inputs.egress_buckets }}
+          PATH_STYLE: ${{ inputs.egress_s3_path_style }}
+        run: |
+          set -euo pipefail
+          [ -n "$STATE_BUCKET" ] || { echo "::error::state_bucket is required (egress allowlist)"; exit 1; }
+          args=(--region "$REGION" --state-bucket "$STATE_BUCKET" --state-region "$STATE_REGION"
+                --services "$SERVICES" --global-hosts "$GLOBAL_HOSTS" --buckets "$BUCKETS"
+                --out "$RUNNER_TEMP/egress-hosts.txt")
+          [ "$PATH_STYLE" != "true" ] || args+=(--s3-path-style)
+          python3 -I "$TOOLS/scripts/egress_hosts.py" "${args[@]}"
+
       - name: Set up the Terraform sandbox
         env:
           TOOLS: ${{ steps.tools.outputs.dir }}
+          SANDBOX_EGRESS_HOSTS: ${{ runner.temp }}/egress-hosts.txt
         run: bash "$TOOLS/scripts/tf_sandbox.sh" setup "$GITHUB_WORKSPACE"
 
       - name: terraform init (sandbox)

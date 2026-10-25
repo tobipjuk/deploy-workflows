@@ -14,7 +14,8 @@ set -e
 export PATH=/opt/tool:\$PATH HOME=/home/runner RUNNER_TEMP=/home/runner/tmp
 mkdir -p \$RUNNER_TEMP ~/repo/infra
 printf %s\\\\n \"terraform {\" \"  required_providers {\" \"    random = { source = \\\"hashicorp/random\\\", version = \\\"3.7.2\\\" }\" \"  }\" \"}\" \"resource \\\"random_id\\\" \\\"x\\\" { byte_length = 4 }\" > ~/repo/infra/main.tf
-/src/scripts/tf_sandbox.sh setup ~/repo
+printf sts.amazonaws.com\\\\n > \$RUNNER_TEMP/egress-hosts.txt
+SANDBOX_EGRESS_HOSTS=\$RUNNER_TEMP/egress-hosts.txt /src/scripts/tf_sandbox.sh setup ~/repo
 /src/scripts/tf_sandbox.sh run infra init -input=false -no-color | tail -1
 /src/scripts/tf_sandbox.sh run infra plan -input=false -no-color -out=tfplan | grep Plan:
 /src/scripts/tf_sandbox.sh egress-report

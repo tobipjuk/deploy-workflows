@@ -14,6 +14,10 @@ pr = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pr)
 
 SECRET = "s3cr3t-value-never-print"
+
+
+def pr_rules():
+    return pr.ATTENTION_RULES
 ALLOW = str(ROOT / "policy" / "allowed-providers.txt")
 AWS = "registry.terraform.io/hashicorp/aws"
 
@@ -263,6 +267,46 @@ class PlanReportTest(unittest.TestCase):
         _, _, o2, _, d2 = self.run_main(plan(*base, risky))
         self.assertEqual(o1["digest"], o2["digest"])  # digest binds addresses + actions only
         self.assertEqual(d2["attention"][0]["after"], "(hidden)")
+
+    def test_attention_never_shows_secret_capable_values(self):
+        p = plan(
+            self.tc("aws_apigatewayv2_integration", "api", "update",
+                    before={"integration_uri": "https://ok.example/hook"},
+                    after={"integration_uri": f"https://evil.example/c?token={SECRET}#{SECRET}"}),
+            self.tc("aws_sns_topic_subscription", "s", "create", before={},
+                    after={"endpoint": f"https://u:{SECRET}@evil.example/p", "protocol": "https"}),
+            self.tc("aws_route53_record", "txt", "create", before={},
+                    after={"name": "x.example.com", "type": "TXT", "records": [SECRET]}),
+            self.tc("aws_lambda_function", "f", "update",
+                    before={"environment": [{"variables": {"PLAIN": "a"}}]},
+                    after={"environment": [{"variables": {"PLAIN": SECRET}}]}),
+            self.tc("aws_iam_role_policy", "p", "update", before={"policy": "{}"},
+                    after={"policy": '{"Sid":"' + SECRET + '"}'}),
+            self.tc("aws_iam_role", "r", "update", before={"assume_role_policy": "{}"},
+                    after={"assume_role_policy": '{"x":"' + SECRET + '"}'}),
+            self.tc("aws_cloudfront_distribution", "d", "update",
+                    before={"origin": [{"domain_name": "a.example"}]},
+                    after={"origin": [{"domain_name": "b.example"}]},
+                    as_={"origin": [{"domain_name": True}]}),
+        )
+        code, summary, o, log, doc = self.run_main(p)
+        self.assertEqual(code, 0)
+        blob = json.dumps(doc) + summary + log
+        self.assertNotIn(SECRET, blob)
+        by = {(a["address"], a["path"]): a for a in doc["attention"]}
+        self.assertEqual(by[("aws_apigatewayv2_integration.api", "integration_uri")]["after"],
+                         "https://evil.example/c?…#…")
+        self.assertEqual(by[("aws_sns_topic_subscription.s", "endpoint")]["after"], "https://…@evil.example/p")
+        self.assertEqual(by[("aws_route53_record.txt", "records[0]")]["after"], "(changed, value not shown)")
+        self.assertEqual(by[("aws_cloudfront_distribution.d", "origin[0].domain_name")]["after"], "(hidden)")
+
+    def test_rule_review(self):
+        # Every show=True rule names things only; secret-capable paths are show=False.
+        secret_capable = ("policy", "assume_role_policy", "environment[0].variables.X", "records[0]")
+        for _, path_re, label, show in pr_rules():
+            if show:
+                for path in secret_capable:
+                    self.assertIsNone(path_re.match(path), (label, path))
 
     def test_attention_unchanged_paths_not_flagged(self):
         p = plan(self.tc("aws_cloudfront_distribution", "d", "update",

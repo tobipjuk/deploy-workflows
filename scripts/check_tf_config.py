@@ -17,6 +17,9 @@ Checks the root module in DIR and every LOCAL module it calls (recursively):
   - profile (provider and backend): a literal equal to --profile, or a var.<name> reference (the
     sandbox holds only that one profile, so any other name simply fails)
   - module sources: local paths only ("./", "../"); registry/git modules are not scanned, refused
+  - data/resource types of Terraform's built-in provider other than terraform_data, in
+    particular data "terraform_remote_state" (its `config` map is a backend config: endpoints,
+    proxies, ... and it reads other state): refused
   - .tf.json files get the same checks
 Allowlists, not denylists: anything new the provider grows is refused until reviewed here.
 Terraform can't set environment variables from HCL, and the sandbox starts from env -i, so
@@ -257,6 +260,15 @@ def parse_json(text, where):
             elif top == "module":
                 for mname, mval in entry.items():
                     items.append(Node("block", "module", [mname], _json_body(mval, f"module.{mname}")))
+            elif top in ("data", "resource"):
+                if not isinstance(entry, dict):
+                    raise ParseError(f"{top}: expected an object")
+                for rtype, named in entry.items():
+                    if not isinstance(named, dict):
+                        raise ParseError(f"{top}.{rtype}: expected an object")
+                    for rname, rval in named.items():
+                        for rv in (rval if isinstance(rval, list) else [rval]):
+                            items.append(Node("block", top, [rtype, rname], []))
             else:
                 items.append(Node("block", top, [], []))
     return items
@@ -315,6 +327,13 @@ def check_items(items, where, profile, problems, module_sources):
                             problems.append(f"{loc}: backend {btype} setting {b.name!r} is not allowed in CI")
                         elif b.name == "profile":
                             check_profile(b, profile, f"{loc} backend", problems)
+        elif n.name in ("data", "resource"):
+            rtype = str(n.labels[0]) if n.labels else "?"
+            # Terraform's built-in provider: terraform_remote_state takes a backend `config` map
+            # (endpoints, proxies, ...) and reads other state; no project uses it. Only
+            # terraform_data is allowed from the built-in provider.
+            if rtype == "terraform_remote_state" or (rtype.startswith("terraform_") and rtype != "terraform_data"):
+                problems.append(f"{loc}: built-in {n.name} {rtype!r} is not allowed in CI")
         elif n.name == "module":
             src = next((i for i in n.body if i.kind == "attr" and i.name == "source"), None)
             lit = literal(src.value) if src else None
