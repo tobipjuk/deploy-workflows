@@ -1,0 +1,282 @@
+# Reusable: terraform plan for a project's production stack, with the read-only plan role.
+#
+# Called from the project's .github/workflows/plan.yml (on push to main + workflow_dispatch):
+#
+#   jobs:
+#     plan:
+#       uses: tobipjuk/deploy-workflows/.github/workflows/tf-plan.yml@main
+#       permissions: { id-token: write, contents: read }
+#       with: { target: ..., tf_dir: ..., ... }
+#
+# The plan role trusts only jobs whose OIDC sub carries
+# job_workflow_ref = tobipjuk/deploy-workflows/.github/workflows/tf-plan.yml@refs/heads/main,
+# so only THIS file can plan with it (see docs/oidc-trust.md).
+#
+# Output for Orion (docs/orion-interface.md):
+#   artifact plan-summary  plan-summary.json: counts, addresses, redacted diff, changes digest,
+#                          bundle sha256. Safe to show in Telegram.
+#   artifact plan-bundle   tfplan + build files + SOURCE + SHA256SUMS, 1 day. Uploaded ONLY when
+#                          the project has a deploy role (deploy_enabled), because a saved plan
+#                          can hold sensitive values.
+name: tf-plan (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: Deploy target name shown in Telegram (e.g. starhuntercrew)
+        type: string
+        required: true
+      tf_dir:
+        description: Terraform root to plan, relative to the repository root
+        type: string
+        required: true
+      aws_region:
+        type: string
+        required: true
+      aws_profile:
+        description: Profile name the Terraform code uses (the OIDC session is written under it); empty = default credentials
+        type: string
+        default: ""
+      aws_account_id:
+        type: string
+        required: true
+      plan_role_arn:
+        type: string
+        required: true
+      state_bucket:
+        description: Overrides the S3 backend bucket (empty = as configured in the code)
+        type: string
+        default: ""
+      terraform_version:
+        type: string
+        default: "1.17.0"
+      deploy_enabled:
+        description: The project has a deploy role (vars.AWS_DEPLOY_ROLE_ARN set). Only then is the plan bundle uploaded.
+        type: boolean
+        default: false
+      bundle_globs:
+        description: Newline-separated globs (repo-relative) of gitignored build files apply reads, e.g. terraform/modules/*/build/*.zip
+        type: string
+        default: ""
+
+permissions: {}
+
+jobs:
+  plan:
+    name: terraform plan
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: tf-plan-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "0"
+      TF_DIR: ${{ inputs.tf_dir }}
+      # Dispatch inputs come from the event payload, which the caller workflow can't rewrite.
+      ALLOW_DESTROY: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.allow_destroy == 'true' }}
+    outputs:
+      has_changes: ${{ steps.report.outputs.has_changes }}
+      changes_digest: ${{ steps.report.outputs.digest }}
+      bundle_sha256: ${{ steps.bundle.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: deploy-workflows tools
+        id: tools
+        uses: tobipjuk/deploy-workflows/.github/actions/tools@main
+
+      - name: Check setup and clean inputs
+        env:
+          ACCOUNT_ID: ${{ inputs.aws_account_id }}
+          ROLE_ARN: ${{ inputs.plan_role_arn }}
+          TOOLS: ${{ steps.tools.outputs.dir }}
+        run: |
+          set -euo pipefail
+          ok=true
+          for v in ACCOUNT_ID ROLE_ARN; do
+            [ -n "${!v}" ] || { echo "::error::Input for $v is empty (repository variable not set?)."; ok=false; }
+          done
+          case "$TF_DIR" in /*|*..*|"") echo "::error::tf_dir must be a relative path inside the repo"; ok=false ;; esac
+          [ -d "$TF_DIR" ] || { echo "::error::tf_dir $TF_DIR does not exist"; ok=false; }
+          # Nothing outside the committed configuration may steer the plan.
+          stray=$(find . -path ./.git -prune -o \( -name '*_override.tf' -o -name 'override.tf' \
+            -o -name '*_override.tf.json' -o -name 'override.tf.json' \
+            -o -name '*.auto.tfvars' -o -name '*.auto.tfvars.json' -o -name '.terraformrc' \
+            -o -name 'terraform.rc' \) -print)
+          [ -z "$stray" ] || { echo "::error::Refusing to plan with override/auto-tfvars/CLI config files: $stray"; ok=false; }
+          $ok
+          # Providers run code with the role's credentials: allowlist checked before init.
+          python3 -I "$TOOLS/scripts/check_lockfile.py" "$TF_DIR/.terraform.lock.hcl" "$TOOLS/policy/allowed-providers.txt"
+
+      - name: Show the OIDC subject
+        run: |
+          set -euo pipefail
+          tok=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | python3 -Ic 'import json,sys; print(json.load(sys.stdin)["value"])')
+          printf '%s' "$tok" | python3 -Ic '
+          import base64, json, sys
+          p = sys.stdin.read().split(".")[1]
+          print("OIDC sub:", json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4)))["sub"])'
+
+      - name: Assume the plan role (OIDC)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ inputs.plan_role_arn }}
+          role-session-name: gh-plan-${{ github.run_id }}
+          role-duration-seconds: 3600
+          aws-region: ${{ inputs.aws_region }}
+          aws-profile: ${{ inputs.aws_profile }}
+          allowed-account-ids: ${{ inputs.aws_account_id }}
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        working-directory: ${{ inputs.tf_dir }}
+        env:
+          STATE_BUCKET: ${{ inputs.state_bucket }}
+        run: |
+          set -euo pipefail
+          args=(-input=false -lockfile=readonly)
+          [ -z "$STATE_BUCKET" ] || args+=("-backend-config=bucket=${STATE_BUCKET}")
+          terraform init "${args[@]}"
+
+      # Plain plan output in the log: Terraform redacts sensitive values there.
+      - name: terraform plan
+        working-directory: ${{ inputs.tf_dir }}
+        run: |
+          set -euo pipefail
+          terraform plan -input=false -lock=false -no-color -out=tfplan
+
+      # The JSON form holds every value in clear text: it stays in RUNNER_TEMP, only the
+      # report script reads it (masks + name filter + truncation), and it is deleted straight after.
+      - name: Summarise the plan
+        id: report
+        working-directory: ${{ inputs.tf_dir }}
+        env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
+          TARGET: ${{ inputs.target }}
+          DEPLOYABLE: ${{ inputs.deploy_enabled }}
+        run: |
+          set -euo pipefail
+          plan_json="$RUNNER_TEMP/plan.json"
+          trap 'rm -f "$plan_json"' EXIT
+          terraform show -json tfplan > "$plan_json"
+          now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          expires=$(date -u -d '+2 hours' +%Y-%m-%dT%H:%M:%SZ)
+          subject=$(git log -1 --format=%s "$GITHUB_SHA" | tr -cd '[:print:]' | cut -c1-120)
+          # Report only here; the gates run below and again in tf-apply.
+          python3 -I "$TOOLS/scripts/plan_report.py" "$plan_json" \
+            --summary "$GITHUB_STEP_SUMMARY" --outputs "$GITHUB_OUTPUT" \
+            --json "$RUNNER_TEMP/plan-summary.json" --allow-destroy true \
+            --allowed-providers "$TOOLS/policy/allowed-providers.txt" \
+            --meta "repo=$GITHUB_REPOSITORY" --meta "target=$TARGET" --meta "sha=$GITHUB_SHA" \
+            --meta "ref=$GITHUB_REF" --meta "event=$GITHUB_EVENT_NAME" --meta "actor=$GITHUB_ACTOR" \
+            --meta "run_id=$GITHUB_RUN_ID" --meta "run_attempt=$GITHUB_RUN_ATTEMPT" \
+            --meta "created_at=$now" --meta "expires_at=$expires" \
+            --meta "deployable=$DEPLOYABLE" --meta "allow_destroy_requested=$ALLOW_DESTROY" \
+            --meta "commit_subject=$subject" --meta "bundle_sha256=null" \
+            || { rc=$?; [ "$rc" -eq 4 ] || exit "$rc"; }
+          {
+            echo "<details><summary>Plan diff (terraform show, sensitive values redacted, truncated)</summary>"
+            echo
+            echo '```'
+            terraform show -no-color tfplan | head -c 60000
+            echo
+            echo '```'
+            echo "</details>"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Gates (destroy, code execution, providers)
+        if: steps.report.outputs.has_changes == 'true'
+        env:
+          BLOCKED: ${{ steps.report.outputs.blocked }}
+          DESTRUCTIVE: ${{ steps.report.outputs.destructive }}
+        run: |
+          set -euo pipefail
+          if [ "$BLOCKED" = "true" ]; then
+            echo "> **Refused:** the plan runs code outside the providers or uses a provider not in the allowlist (see flags above)." >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Plan blocked (provisioner, external data source or provider outside the allowlist)."
+            exit 1
+          fi
+          if [ "$DESTRUCTIVE" = "true" ] && [ "$ALLOW_DESTROY" != "true" ]; then
+            echo "> **Refused:** the plan deletes, replaces or does something not understood. Run plan.yml by hand with allow_destroy = true if intended." >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Destructive plan. Run the plan workflow by hand with allow_destroy = true if intended."
+            exit 1
+          fi
+
+      # Bundle = the saved plan + the build files it was made from + the commit. tf-apply applies
+      # exactly these bytes. Not produced without a deploy role (nothing could apply it, and a
+      # saved plan can hold sensitive values).
+      - name: Bundle the plan
+        id: bundle
+        if: steps.report.outputs.has_changes == 'true' && inputs.deploy_enabled
+        env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
+          GLOBS: ${{ inputs.bundle_globs }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r g; do
+            g=$(printf '%s' "$g" | xargs)
+            [ -z "$g" ] || args+=(--glob "$g")
+          done <<< "$GLOBS"
+          out=$(python3 -I "$TOOLS/scripts/bundle.py" create --root "$GITHUB_WORKSPACE" \
+            --tfplan "$TF_DIR/tfplan" --source "$GITHUB_SHA" --out "$RUNNER_TEMP/plan-bundle.tar" "${args[@]}")
+          sum=$(printf '%s\n' "$out" | sed -n 's/^sha256=//p')
+          files=$(printf '%s\n' "$out" | sed -n 's/^files=//p')
+          [[ "$sum" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::bundle sha256 missing"; exit 1; }
+          echo "sha256=$sum" >> "$GITHUB_OUTPUT"
+          python3 -I - "$RUNNER_TEMP/plan-summary.json" "$sum" <<'PY'
+          import json, sys
+          p, s = sys.argv[1], sys.argv[2]
+          with open(p, encoding="utf-8") as f:
+              d = json.load(f)
+          d["bundle_sha256"] = s
+          d["bundle_artifact"] = "plan-bundle"
+          with open(p, "w", encoding="utf-8") as f:
+              json.dump(d, f, indent=1, sort_keys=True, ensure_ascii=False)
+              f.write("\n")
+          PY
+          echo "Plan bundle sha256: \`$sum\` (build files: $files)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the plan bundle
+        if: steps.bundle.outputs.sha256 != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plan-bundle
+          path: ${{ runner.temp }}/plan-bundle.tar
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Upload the plan summary
+        if: steps.report.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plan-summary
+          path: ${{ runner.temp }}/plan-summary.json
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Note when there is no deploy role
+        if: steps.report.outputs.has_changes == 'true' && !inputs.deploy_enabled
+        run: |
+          set -euo pipefail
+          echo "::notice::No deploy role for this project (AWS_DEPLOY_ROLE_ARN unset): plan only, no bundle."
+          echo "> Plan only: no deploy role (AWS_DEPLOY_ROLE_ARN unset), so no plan bundle was uploaded. Apply locally." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove the saved plan from the runner
+        if: always()
+        run: rm -f "$TF_DIR/tfplan" "$RUNNER_TEMP/plan-bundle.tar"

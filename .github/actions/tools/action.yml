@@ -1,0 +1,26 @@
+# Puts the deploy-workflows scripts and policy on the runner, outside the project checkout.
+# The reusable workflows reference this action by its full path at @main, so the code that
+# gates and applies a plan always comes from this repository, never from the project repo.
+name: deploy-workflows tools
+description: Copy the deploy-workflows scripts and policy to RUNNER_TEMP and output the path.
+outputs:
+  dir:
+    description: Directory holding scripts/ and policy/
+    value: ${{ steps.copy.outputs.dir }}
+runs:
+  using: composite
+  steps:
+    - id: copy
+      shell: bash
+      env:
+        SRC: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        dest="$RUNNER_TEMP/deploy-workflows-tools"
+        rm -rf "$dest"
+        mkdir -p "$dest"
+        # github.action_path = <checkout of this action>/.github/actions/tools
+        root=$(cd "$SRC/../../.." && pwd)
+        cp -R "$root/scripts" "$root/policy" "$dest/"
+        chmod -R a-w "$dest"
+        echo "dir=$dest" >> "$GITHUB_OUTPUT"

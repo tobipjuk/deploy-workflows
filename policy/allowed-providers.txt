@@ -1,0 +1,8 @@
+# Terraform providers a deploy may use (registry addresses, one per line).
+# Every provider runs code with the plan role's (plan) or the deploy role's (apply) credentials,
+# so this list lives here, in the repo the box can't write, not in the project repos.
+# Adding one = a reviewed commit to deploy-workflows. Deliberately absent: hashicorp/external
+# (runs programs at plan time), hashicorp/null and hashicorp/local.
+registry.terraform.io/hashicorp/aws
+registry.terraform.io/hashicorp/archive
+registry.terraform.io/hashicorp/random
