@@ -309,6 +309,25 @@ reads. The fix is project-side:
 Until then set `plan_secret_parameter_arns` anyway: the plan fails closed at refresh instead of
 reading secrets.
 
+## Lambda environment variables (`plan_allow_lambda_env_decrypt`)
+
+Lambda decrypts function env vars with KMS **on the caller's behalf**. The plan role's
+`kms:Decrypt` deny therefore makes Lambda hide every env var on refresh (CloudTrail: Decrypt
+AccessDenied, invokedBy lambda), so plans never reach "No changes"; and the deploy role needs
+Lambda to encrypt changed env vars. Projects with Lambda env vars set
+`plan_allow_lambda_env_decrypt = true`, which:
+
+- replaces the plan role's unconditional deny with two denies on `kms:Decrypt`: unless
+  `kms:ViaService = lambda.<region>.amazonaws.com`, and unless the encryption context
+  `aws:lambda:FunctionArn` is like `arn:aws:lambda:<region>:<acct>:function:<prefix>-*` (an absent
+  key matches both, so every other Decrypt stays denied), plus a matching allow;
+- adds the same scoped allow (Decrypt, Encrypt, GenerateDataKey*) to the CI boundary and the
+  deploy role, so projects don't hand-write it (~360 characters of the boundary).
+
+The values then appear in the plan's attribute diff only as "(hidden)" (`variables` is in the
+redaction filter), but they are readable by the plan role: keep secrets out of env vars
+(README "Secrets").
+
 ## Existing Lambda roles
 
 Roles created before this module (path `/`, no boundary) can't be changed by CI. Move them once,

@@ -72,3 +72,72 @@ run "deploy_role_needs_app_slug" {
 
   expect_failures = [aws_iam_role.deploy]
 }
+
+run "plan_decrypt_denied_by_default" {
+  command = plan
+
+  assert {
+    condition = (
+      length([for s in jsondecode(aws_iam_role_policy.plan_no_secrets[0].policy).Statement : s
+      if s.Sid == "DenyDecrypt" && s.Effect == "Deny" && !can(s.Condition)]) == 1
+    )
+    error_message = "Without the opt-in, the plan role must have an unconditional kms:Decrypt deny."
+  }
+
+  assert {
+    condition = (
+      length([for s in jsondecode(aws_iam_policy.ci_boundary.policy).Statement : s if s.Sid == "LambdaEnvKmsOwnFunctions"]) == 0
+      && length([for s in jsondecode(aws_iam_role_policy.deploy_writes[0].policy).Statement : s if s.Sid == "LambdaEnvKmsOwnFunctions"]) == 0
+    )
+    error_message = "No Lambda env KMS allow without the opt-in."
+  }
+}
+
+run "plan_lambda_env_decrypt_opt_in" {
+  command = plan
+
+  variables {
+    plan_allow_lambda_env_decrypt = true
+  }
+
+  assert {
+    condition = (
+      length([for s in jsondecode(aws_iam_role_policy.plan_no_secrets[0].policy).Statement : s if s.Sid == "DenyDecrypt"]) == 0
+    )
+    error_message = "The unconditional DenyDecrypt must be replaced."
+  }
+
+  assert {
+    condition = (
+      [for s in jsondecode(aws_iam_role_policy.plan_no_secrets[0].policy).Statement : s.Condition
+      if s.Sid == "DenyDecryptExceptViaLambda" && s.Effect == "Deny"][0]
+      == { StringNotEquals = { "kms:ViaService" = "lambda.eu-west-2.amazonaws.com" } }
+    )
+    error_message = "Deny 1 must be StringNotEquals kms:ViaService = lambda.<region>."
+  }
+
+  assert {
+    condition = (
+      [for s in jsondecode(aws_iam_role_policy.plan_no_secrets[0].policy).Statement : s.Condition
+      if s.Sid == "DenyDecryptExceptOwnFunctionEnv" && s.Effect == "Deny"][0]
+      == { StringNotLike = { "kms:EncryptionContext:aws:lambda:FunctionArn" = "arn:aws:lambda:eu-west-2:123456789012:function:tst-*" } }
+    )
+    error_message = "Deny 2 must be StringNotLike on the FunctionArn encryption context for own functions."
+  }
+
+  assert {
+    condition = alltrue([for doc in [
+      jsondecode(aws_iam_policy.ci_boundary.policy),
+      jsondecode(aws_iam_role_policy.deploy_writes[0].policy),
+      ] : length([for s in doc.Statement : s if s.Sid == "LambdaEnvKmsOwnFunctions"
+        && s.Condition.StringEquals["kms:ViaService"] == "lambda.eu-west-2.amazonaws.com"
+        && s.Condition.StringLike["kms:EncryptionContext:aws:lambda:FunctionArn"] == "arn:aws:lambda:eu-west-2:123456789012:function:tst-*"
+    ]) == 1])
+    error_message = "Boundary and deploy role need the scoped Lambda env KMS allow."
+  }
+
+  assert {
+    condition     = length(aws_iam_policy.ci_boundary.policy) <= 6144
+    error_message = "Boundary must stay within the managed policy size limit."
+  }
+}

@@ -108,6 +108,19 @@ variable "plan_deny_kms_decrypt" {
   default     = true
 }
 
+variable "plan_allow_lambda_env_decrypt" {
+  description = <<-EOT
+    Let Lambda decrypt function environment variables on the CI roles' behalf, for the project's
+    own functions only (kms:ViaService = lambda.<region>.amazonaws.com AND encryption context
+    aws:lambda:FunctionArn like arn:aws:lambda:<region>:<acct>:function:<prefix>-*). Without it
+    the plan role's kms:Decrypt deny makes Lambda hide all env vars on refresh (perpetual diff),
+    and the deploy role can't have Lambda encrypt changed env vars. Every other Decrypt stays
+    denied to the plan role. Set true for projects whose Lambda functions have env vars.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "private_bucket_names" {
   description = "Buckets holding private data (backups, exports). CI may not read their objects or change their policy, ACL, public access block or ownership controls."
   type        = list(string)

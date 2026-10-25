@@ -19,6 +19,19 @@ locals {
   ))
   protected_patterns = distinct([for n in var.protected_record_name_patterns : trimsuffix(lower(trimspace(n)), ".")])
   source_fn_pattern  = "arn:${local.partition}:lambda:${var.region}:${local.acct}:function:${local.p}-*"
+  lambda_via         = "lambda.${var.region}.amazonaws.com"
+  # Lambda env var encryption, on the caller's behalf, for the project's own functions only.
+  lambda_env_kms_condition = {
+    StringEquals = { "kms:ViaService" = local.lambda_via }
+    StringLike   = { "kms:EncryptionContext:aws:lambda:FunctionArn" = local.source_fn_pattern }
+  }
+  lambda_env_kms_statements = var.plan_allow_lambda_env_decrypt ? [{
+    Sid       = "LambdaEnvKmsOwnFunctions"
+    Effect    = "Allow"
+    Action    = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey", "kms:GenerateDataKeyWithoutPlaintext"]
+    Resource  = "*"
+    Condition = local.lambda_env_kms_condition
+  }] : []
 
   # ---- CI boundary: the ceiling ----------------------------------------------------------
   ci_boundary_policy = jsonencode({
@@ -64,7 +77,7 @@ locals {
         Resource  = local.lambda_role_pattern
         Condition = { StringEquals = { "iam:PassedToService" = "lambda.amazonaws.com" } }
       },
-    ], var.boundary_statements)
+    ], local.lambda_env_kms_statements, var.boundary_statements)
   })
 
   # ---- Guardrails: explicit denies on both CI roles ------------------------------------------
@@ -182,11 +195,37 @@ locals {
       Action   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParameterHistory", "ssm:GetParametersByPath"]
       Resource = var.plan_secret_parameter_arns
     }],
-    var.plan_deny_kms_decrypt ? [{
+    var.plan_deny_kms_decrypt && !var.plan_allow_lambda_env_decrypt ? [{
       Sid      = "DenyDecrypt"
       Effect   = "Deny"
       Action   = ["kms:Decrypt"]
       Resource = "*"
+    }] : [],
+    # Opt-in: deny every Decrypt that is not Lambda decrypting one of the project's own functions'
+    # env vars. With the context key absent both conditions match, so all else stays denied.
+    var.plan_deny_kms_decrypt && var.plan_allow_lambda_env_decrypt ? [
+      {
+        Sid       = "DenyDecryptExceptViaLambda"
+        Effect    = "Deny"
+        Action    = ["kms:Decrypt"]
+        Resource  = "*"
+        Condition = { StringNotEquals = { "kms:ViaService" = local.lambda_via } }
+      },
+      {
+        Sid       = "DenyDecryptExceptOwnFunctionEnv"
+        Effect    = "Deny"
+        Action    = ["kms:Decrypt"]
+        Resource  = "*"
+        Condition = { StringNotLike = { "kms:EncryptionContext:aws:lambda:FunctionArn" = local.source_fn_pattern } }
+      },
+    ] : [],
+    # The plan role's identity needs the allow as well (ReadOnlyAccess has no kms:Decrypt).
+    var.plan_allow_lambda_env_decrypt ? [{
+      Sid       = "AllowLambdaEnvDecryptOwnFunctions"
+      Effect    = "Allow"
+      Action    = ["kms:Decrypt"]
+      Resource  = "*"
+      Condition = local.lambda_env_kms_condition
     }] : [],
   )
 
@@ -220,7 +259,7 @@ locals {
         Resource  = local.lambda_role_pattern
         Condition = { StringEquals = { "iam:PassedToService" = "lambda.amazonaws.com" } }
       },
-    ], var.deploy_statements)
+    ], local.lambda_env_kms_statements, var.deploy_statements)
   })
 
   # ---- Lambda boundary: what any role CI creates can ever do ---------------------------------
