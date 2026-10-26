@@ -105,8 +105,15 @@ case "$cmd" in
         --dport "$SANDBOX_PROXY_PORT" -j ACCEPT
     fi
     # The sandbox user must be able to run it (and it must be the pinned version, if given).
-    ver=$(sudo -n -u "$SANDBOX_USER" -H -- env -i HOME="$SANDBOX_HOME" PATH="$SANDBOX_TF_DIR:/usr/bin:/bin" \
-      "$SANDBOX_TF" version 2>&1 | head -n1) || die "the sandbox user can't run terraform: $ver"
+    # CHECKPOINT_DISABLE: with egress blocked, the update check held `terraform version` for
+    # 45-90 s. Capture all output and take line 1 in-shell: `| head -n1` under pipefail failed
+    # when head closed the pipe before terraform's later writes (SIGPIPE), version line intact.
+    rc=0
+    out=$(sudo -n -u "$SANDBOX_USER" -H -- env -i HOME="$SANDBOX_HOME" PATH="$SANDBOX_TF_DIR:/usr/bin:/bin" \
+      CHECKPOINT_DISABLE=1 "$SANDBOX_TF" version 2>&1) || rc=$?
+    ver=${out%%$'\n'*}
+    ver=${ver:0:200}
+    [ "$rc" = 0 ] || die "the sandbox user can't run terraform (exit $rc): $ver"
     case "$ver" in "Terraform v"*) ;; *) die "the sandbox user can't run terraform: $ver" ;; esac
     if [ -n "${SANDBOX_TF_VERSION:-}" ] && [ "$ver" != "Terraform v$SANDBOX_TF_VERSION" ]; then
       die "sandbox terraform is '$ver', expected v$SANDBOX_TF_VERSION"

@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # Plays a hostile Terraform config: look for the runner's secrets everywhere it can.
-[ "${1:-}" = version ] && { echo "Terraform v0.0.0-fake"; exit 0; }
+if [ "${1:-}" = version ]; then
+  # Like real terraform, more than one line; the checkpoint call must be disabled (issue: setup's
+  # version check stalled on the update check and died on SIGPIPE from `| head -n1`). The padding
+  # overflows a pipe buffer, so any caller that pipes this to `head -n1` under pipefail fails.
+  [ "${CHECKPOINT_DISABLE:-}" = 1 ] || { echo "fake-terraform: CHECKPOINT_DISABLE not set" >&2; exit 1; }
+  echo "Terraform v0.0.0-fake"
+  echo "on linux_amd64"
+  head -c 200000 /dev/zero | tr '\0' 'x'; echo
+  exit 0
+fi
 if [ "${1:-}" = hang ]; then
   # like the AWS provider retrying a refused endpoint for a long time
   for _ in $(seq 1 120); do curl -s -o /dev/null --max-time 5 https://not-listed.amazonaws.com/ || true; sleep 1; done
