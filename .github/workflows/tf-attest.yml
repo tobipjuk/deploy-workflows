@@ -1,16 +1,19 @@
-# Reusable (nested): attest a plan's artifacts. Called ONLY from tf-plan.yml as its second job.
+# Reusable (nested): attest a plan's artifacts. Called ONLY from tf-plan.yml and site-plan.yml,
+# as their second job.
 #
 # Why a separate file: the attestation token's job_workflow_ref is then
 #   tobipjuk/deploy-workflows/.github/workflows/tf-attest.yml@refs/heads/main
-# which the plan job (it runs project Terraform, sandboxed) can never carry, even if it escaped
-# the sandbox and reached the OIDC request credentials. This job runs no project code: no
+# which the plan job (tf-plan's runs project Terraform, sandboxed) can never carry, even if it
+# escaped the sandbox and reached the OIDC request credentials. This job runs no project code: no
 # checkout, only the deploy-workflows tools, the two artifacts of this run, and a token request.
 #
 # A box-written plan.yml could call this file directly to attest artifacts it made itself.
-# tf-apply and Orion refuse such runs: the plan run must consist of exactly the two jobs of
-# tf-plan.yml (plan + this one), both successful, referencing tf-plan.yml and tf-attest.yml from
-# deploy-workflows@refs/heads/main and nothing else (scripts/check_plan_run.py), so there is
-# no room for an extra job that uploads or swaps artifacts.
+# tf-apply, site-apply and Orion refuse such runs: the plan run must consist of exactly the two
+# jobs of its kind (plan + this one), both successful, and reference EXACTLY {tf-plan.yml or
+# site-plan.yml, tf-attest.yml} from deploy-workflows@refs/heads/main
+# (scripts/check_plan_run.py --kind), so there is no room for an extra job that uploads or swaps
+# artifacts. The token proves the bytes, not the kind: the kind comes from the run shape and
+# plan-summary.json's "kind" (site runs say "site"; tf-apply refuses anything but terraform/absent).
 name: tf-attest (reusable, nested)
 
 on:
