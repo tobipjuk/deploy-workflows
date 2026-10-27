@@ -8,6 +8,18 @@
  "bucket": "ev3-workshop-880207437749",
  "root_keys": ["index.html", "pin.html", "book.html", "sw.js", "community.json"],
  "prefixes": ["img/", "fonts/", "pages/", "instructions/", "community/"],
+ "allowed_cache": {
+  "index.html": ["short", "no-cache"],
+  "pin.html": ["short", "no-cache"],
+  "book.html": ["short", "no-cache"],
+  "sw.js": ["no-cache"],
+  "community.json": ["short", "no-cache"],
+  "img/": ["long", "short"],
+  "fonts/": ["long"],
+  "pages/": ["immutable", "short"],
+  "instructions/": ["long"],
+  "community/": ["private-day", "private-short", "private-immutable"]
+ },
  "browser_code_sources": ["site/"],
  "manifest": {"bucket": "ev3-workshop-deploy-880207437749", "key": "deployed-manifest.json"},
  "lambda": {

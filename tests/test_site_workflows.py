@@ -45,15 +45,16 @@ class IamDraftTest(unittest.TestCase):
         st = [s for s in doc["Statement"] if s["Sid"] == "DenyUnconditionalPut"][0]
         self.assertEqual(st["Condition"], {"Null": {"s3:if-match": "true", "s3:if-none-match": "true"}})
 
-    def test_plan_role_reads_text_keys_only(self):
+    def test_plan_role_reads_site_only(self):
         doc = site_iam.plan_policy(policy())
         allows = {a for s in doc["Statement"] if s["Effect"] == "Allow" for a in s["Action"]}
         self.assertEqual(allows, set(site_iam.PLAN_ACTIONS))
-        text = [s for s in doc["Statement"] if s["Sid"] == "SiteTextKeysOnly"][0]["Resource"]
-        for r in text:
-            self.assertTrue(re.search(r"\.(" + "|".join(sorted(sp.TEXT_EXTS)) + r")$", r), r)
-        self.assertNotIn("arn:aws:s3:::ev3-workshop-880207437749/pages/*", text)
-        self.assertIn("arn:aws:s3:::ev3-workshop-880207437749/pages/*.json", text)
+        reads = [s for s in doc["Statement"] if s["Sid"] == "SiteObjectsRead"][0]["Resource"]
+        self.assertEqual(reads, site_iam._arns(policy())["site"])
+        self.assertNotIn("arn:aws:s3:::ev3-workshop-880207437749/*", reads)
+        writes = {a for s in doc["Statement"] if s["Effect"] == "Allow" for a in s["Action"]
+                  if not a.split(":")[1].startswith(("Get", "List", "Describe"))}
+        self.assertEqual(writes, set())
 
     def test_sizes_fit_iam_limits(self):
         for doc in (site_iam.deploy_policy(policy()), site_iam.plan_policy(policy())):

@@ -13,8 +13,11 @@ managed policy or a widened boundary can't add rights), a Deny on unconditional 
 explicit denies on the dangerous families as a second layer.
 
 Plan role: reads only (no ReadOnlyAccess): the function, the gate, the bucket listing, GetObject
-on TEXT keys only (the site's text extensions under SITE) and the manifest, with its own
-NotAction deny and explicit denies on the key store, secret values and kms:Decrypt.
+on SITE and the manifest, with its own NotAction deny and explicit denies on the key store,
+secret values and kms:Decrypt. GetObject covers all of SITE, not only text keys (design rev. 3
+said text keys only): the adoption plan HEADs binary objects to compare their Content-Type and
+Cache-Control (Guardian on f944888, M1), and HeadObject is authorised as s3:GetObject. Nothing
+in SITE is secret (design round 4 H1); every byte is in git.
 
 Both roles also get s3:ListBucket on the manifest bucket, limited to the manifest key: without
 it S3 answers a missing manifest with 403 instead of 404, and the adoption plan/apply couldn't
@@ -111,7 +114,7 @@ def plan_policy(pol):
         {"Sid": "GateRead", "Effect": "Allow", "Action": ["cloudfront:GetFunction", "cloudfront:DescribeFunction"],
          "Resource": a["gate"]},
         {"Sid": "SiteListing", "Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": a["bucket"]},
-        {"Sid": "SiteTextKeysOnly", "Effect": "Allow", "Action": ["s3:GetObject"], "Resource": a["text"]},
+        {"Sid": "SiteObjectsRead", "Effect": "Allow", "Action": ["s3:GetObject"], "Resource": a["site"]},
         {"Sid": "ManifestRead", "Effect": "Allow", "Action": ["s3:GetObject"], "Resource": a["manifest"]},
         manifest_list(a),
         {"Sid": "DenyEverythingElse", "Effect": "Deny", "NotAction": list(PLAN_ACTIONS), "Resource": "*"},

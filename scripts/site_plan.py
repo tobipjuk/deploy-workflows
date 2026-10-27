@@ -198,7 +198,7 @@ class Planner:
                 continue
             if "/" not in rel and any(fnmatch.fnmatchcase(rel, g) for g in ignore):
                 continue
-            raise sd.Refused(f"{path}: new or renamed Lambda member, not in the policy's allowlist "
+            raise sd.Refused(f"{path!r}: new or renamed Lambda member, not in the policy's allowlist "
                              "(add it with a reviewed deploy-workflows PR)")
         members = {}
         for name in sorted(allowed):
@@ -230,11 +230,11 @@ class Planner:
                 manifest = parse_manifest(f.read(), pol)
         except site_aws.NotFound:
             metag, manifest = None, None
-        live_text = {}
+        live_text, live_meta = {}, {}
         for key, d in desired.items():
             if d["class"] in ("code", "data") and key in listing:
                 p = os.path.join(self.workdir, "live-text")
-                self.aws.get_object(pol["bucket"], key, p)
+                live_meta[key] = self.aws.get_object_meta(pol["bucket"], key, p)
                 with open(p, "rb") as f:
                     live_text[key] = f.read()
         fn = pol["lambda"]["function_name"]
@@ -255,6 +255,7 @@ class Planner:
         dev_code, _ = self.aws.cf_get_function(gname, "DEVELOPMENT")
         return {
             "listing": listing, "manifest": manifest, "manifest_etag": metag, "live_text": live_text,
+            "live_meta": live_meta,
             "lambda": {"revision_id": gf["revision_id"], "code_sha256": gf["code_sha256"],
                        "members": sd.read_zip(zdata), "config": config},
             "gate": {"live_etag": live_desc["etag"], "dev_etag": dev_desc["etag"], "config": dev_desc["config"],
@@ -305,7 +306,18 @@ class Planner:
                 os.unlink(p)
             return sd.etag_equal(lv["etag"], whole, parts)
 
-        s3 = sd.compute_s3(pol, desired, live["listing"], manifest_objs, live["live_text"], binary_match, adoption)
+        if adoption:
+            # Binary keys can only be adopted if their metadata is the desired one too: HEAD every
+            # live binary key of the right size (in parallel; adoption runs about once).
+            heads = [k for k, d in desired.items() if d["class"] == "binary" and k in live["listing"]
+                     and live["listing"][k]["size"] == d["size"]]
+            if heads:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=8) as ex:
+                    for k, meta in zip(heads, ex.map(lambda k: self.aws.head_object(pol["bucket"], k), heads)):
+                        live["live_meta"][k] = meta
+        s3 = sd.compute_s3(pol, desired, live["listing"], manifest_objs, live["live_text"], binary_match, adoption,
+                           live["live_meta"])
         unverified = []
         for put in s3["puts"]:
             key = put["key"]
@@ -335,11 +347,24 @@ class Planner:
         attention, diffs, reasons = [], [], []
         drift = list(s3["drift"])
 
+        # Cache-Control / Content-Type of code and root keys (Guardian on f944888, M1)
+        for put in s3["puts"]:
+            key = put["key"]
+            d = desired[key]
+            if not ("/" not in key or d["class"] == "code"):
+                continue
+            old_cc, old_ct = put["live_cache_control"], put["live_content_type"]
+            changed = put["action"] == "update" and (old_cc != d["cache_control"] or old_ct != d["content_type"])
+            if changed or (put["action"] == "create" and d["cache"] in sd.LONG_CACHE):
+                before = f"{old_ct or '?'} | {old_cc or '?'}" if put["action"] == "update" else None
+                attention.append(sd._att(f"s3:{key}", "Cache-Control or Content-Type", put["action"], key,
+                                         before, f"{d['content_type']} | {d['cache_control']}"))
+
         # S3 text diffs: old = live bytes
         for put in s3["puts"]:
             key = put["key"]
             d = desired[key]
-            if d["class"] not in ("code", "data"):
+            if d["class"] not in ("code", "data") or put["reason"] == "metadata":
                 continue
             old = None
             if key in live["live_text"]:
@@ -437,6 +462,11 @@ class Planner:
                 attention.append(sd._att("s3:*", "LIVE DRIFT", "info", None, None,
                                          f"{len(drift)} objects (full list in the attachment)"))
         for dfx in diffs:
+            if dfx["kind"] == "code":
+                n = sd.count_nonascii_letters_added(dfx["text"])
+                if n:
+                    attention.append(sd._att(dfx["address"], "Non-ASCII letters or combining marks in code", "update",
+                                             dfx["file"], None, f"{n} in added lines (possible homoglyphs)"))
             if dfx["invisible"] and dfx["kind"] in ("code", "data"):
                 attention.append(sd._att(dfx["address"], "Invisible or bidi characters", "update", dfx["file"],
                                          None, f"{dfx['invisible']} in added lines (shown as <U+XXXX>)"))
@@ -455,14 +485,11 @@ class Planner:
         kept, code_complete, data_truncated = sd.fit_diffs(diffs)
         if not code_complete:
             reasons.append("a code diff is too large to show in full on the card: not deployable")
-        attention = sd.order_attention(attention)
-        att_trunc = len(attention) > sd.MAX_ATTENTION
-        if att_trunc:
-            attention = attention[:sd.MAX_ATTENTION - 1] + [sd._att("*", "More", "info", None, None,
-                                                                     f"{len(attention) - sd.MAX_ATTENTION + 1} more")]
+        attention, att_trunc = sd.cap_attention(sd.order_attention(attention))
 
         prestate = {
             "listing": {k: v["etag"] for k, v in sorted(live["listing"].items())},
+            "last_modified": {k: v.get("last_modified", "") for k, v in sorted(live["listing"].items())},
             "manifest_etag": live["manifest_etag"],
             "lambda": {"revision_id": live["lambda"]["revision_id"], "code_sha256": live["lambda"]["code_sha256"]},
             "gate": {"live_etag": g["live_etag"], "dev_etag": g["dev_etag"], "config": g["config"],
@@ -477,7 +504,7 @@ class Planner:
             "puts": [{"key": k, "action": p["action"], "if_match": p["if_match"], "sha256": desired[k]["sha256"],
                       "size": desired[k]["size"], "content_type": desired[k]["content_type"],
                       "cache_control": desired[k]["cache_control"], "class": desired[k]["class"],
-                      "source": desired[k]["source"]} for k, p in sorted(put_set.items())],
+                      "reason": p["reason"], "source": desired[k]["source"]} for k, p in sorted(put_set.items())],
             "deletes": s3["deletes"],
             "adopted": s3["adopted"],
             "desired": {k: {"sha256": d["sha256"], "size": d["size"], "content_type": d["content_type"],
@@ -631,10 +658,11 @@ def main(argv=None, aws=None, lfs=None):
         out("no_baseline", "true")
         return 3
     except (sp.PolicyError, sd.Refused, lfs_fetch.LfsError, site_aws.AwsError, site_bundle.BundleError) as e:
-        print(f"::error::Site plan refused: {e}"[:600], file=sys.stderr)
+        msg = sd.one_line(str(e))[:600]
+        print(f"::error::Site plan refused: {msg}", file=sys.stderr)
         if args.summary:
             with open(args.summary, "a", encoding="utf-8") as f:
-                f.write(f"### Site plan refused\n\n{str(e)[:600]}\n")
+                f.write(f"### Site plan refused\n\n{msg}\n")
         return 1
     finally:
         if git:

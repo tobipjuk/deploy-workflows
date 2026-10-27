@@ -37,6 +37,13 @@ def strip_etag(e):
     return str(e or "").strip('"')
 
 
+def _need(doc, op, *keys):
+    """A response must be an object with these keys; anything else is an error, never a crash."""
+    if not isinstance(doc, dict) or any(k not in doc for k in keys):
+        raise AwsError(op, "unexpected response")
+    return doc
+
+
 class CliAws:
     def __init__(self, region, profile=None, aws_bin="aws", timeout=600):
         self.region = region
@@ -76,17 +83,30 @@ class CliAws:
     # -- S3 ----------------------------------------------------------------------------------
     def list_objects(self, bucket):
         doc = self._run("s3:ListObjectsV2", ["s3api", "list-objects-v2", f"--bucket={bucket}"],
-                        query="Contents[].{k:Key,e:ETag,s:Size}") or []
+                        query="Contents[].{k:Key,e:ETag,s:Size,m:LastModified}") or []
+        if not isinstance(doc, list):
+            raise AwsError("s3:ListObjectsV2", "unexpected response")
         out = {}
         for o in doc:
-            out[o["k"]] = {"etag": strip_etag(o["e"]), "size": int(o["s"])}
+            _need(o, "s3:ListObjectsV2", "k", "e", "s")
+            out[o["k"]] = {"etag": strip_etag(o["e"]), "size": int(o["s"]), "last_modified": str(o.get("m") or "")}
         return out
 
     def get_object(self, bucket, key, dest):
         """Download to dest; returns the ETag. Raises NotFound if the key doesn't exist."""
-        doc = self._run("s3:GetObject", ["s3api", "get-object", f"--bucket={bucket}", f"--key={key}", dest],
-                        query="{e:ETag,l:ContentLength}")
-        return strip_etag(doc["e"])
+        return self.get_object_meta(bucket, key, dest)["etag"]
+
+    def get_object_meta(self, bucket, key, dest):
+        """Download to dest; returns {etag, content_type, cache_control}."""
+        doc = _need(self._run("s3:GetObject", ["s3api", "get-object", f"--bucket={bucket}", f"--key={key}", dest],
+                              query="{e:ETag,t:ContentType,c:CacheControl}"), "s3:GetObject", "e")
+        return {"etag": strip_etag(doc["e"]), "content_type": doc.get("t"), "cache_control": doc.get("c")}
+
+    def head_object(self, bucket, key):
+        """{etag, content_type, cache_control} without the body (needs s3:GetObject)."""
+        doc = _need(self._run("s3:HeadObject", ["s3api", "head-object", f"--bucket={bucket}", f"--key={key}"],
+                              query="{e:ETag,t:ContentType,c:CacheControl}"), "s3:HeadObject", "e")
+        return {"etag": strip_etag(doc["e"]), "content_type": doc.get("t"), "cache_control": doc.get("c")}
 
     def put_object(self, bucket, key, path, content_type, cache_control, sha256_b64,
                    if_match=None, if_none_match=False):
@@ -97,7 +117,7 @@ class CliAws:
                 "--checksum-algorithm=SHA256", f"--checksum-sha256={sha256_b64}"]
         args.append(f"--if-match={if_match}" if if_match else "--if-none-match=*")
         doc = self._run("s3:PutObject", args, query="{e:ETag,c:ChecksumSHA256}")
-        if not doc or doc.get("c") != sha256_b64:
+        if not isinstance(doc, dict) or not doc.get("e") or doc.get("c") != sha256_b64:
             raise AwsError("s3:PutObject", "checksum not confirmed")
         return strip_etag(doc["e"])
 
@@ -110,6 +130,7 @@ class CliAws:
         doc = self._run("lambda:GetFunction", ["lambda", "get-function", f"--function-name={name}"],
                         query="{l:Code.Location,t:Code.RepositoryType,c:Configuration.CodeSha256,"
                               "r:Configuration.RevisionId}")
+        _need(doc, "lambda:GetFunction", "l", "c", "r")
         return {"location": doc["l"], "repository_type": doc["t"], "code_sha256": doc["c"],
                 "revision_id": doc["r"]}
 
@@ -122,13 +143,14 @@ class CliAws:
                               "layers:Layers[].Arn,vpc_id:VpcConfig.VpcId,kms_key_arn:KMSKeyArn,"
                               "package_type:PackageType,revision_id:RevisionId,code_sha256:CodeSha256,"
                               "state:State,last_update_status:LastUpdateStatus}")
-        return doc
+        return _need(doc, "lambda:GetFunctionConfiguration")
 
     def lambda_update_code(self, name, zip_path, revision_id):
         doc = self._run("lambda:UpdateFunctionCode",
                         ["lambda", "update-function-code", f"--function-name={name}",
                          f"--zip-file=fileb://{zip_path}", f"--revision-id={revision_id}"],
                         query="{c:CodeSha256,r:RevisionId}")
+        _need(doc, "lambda:UpdateFunctionCode", "c", "r")
         return {"code_sha256": doc["c"], "revision_id": doc["r"]}
 
     def download(self, url, dest, max_bytes=MAX_LAMBDA_ZIP):
@@ -157,6 +179,7 @@ class CliAws:
                         ["cloudfront", "describe-function", f"--name={name}", f"--stage={stage}"],
                         region="us-east-1",
                         query="{e:ETag,s:FunctionSummary.Status,c:FunctionSummary.FunctionConfig}")
+        _need(doc, "cloudfront:DescribeFunction", "e")
         cfg = doc.get("c") or {}
         kvs = (cfg.get("KeyValueStoreAssociations") or {}).get("Items") or []
         return {"etag": doc["e"], "status": doc.get("s"),
@@ -169,6 +192,7 @@ class CliAws:
             doc = self._run("cloudfront:GetFunction",
                             ["cloudfront", "get-function", f"--name={name}", f"--stage={stage}", out],
                             region="us-east-1", query="{e:ETag}")
+            _need(doc, "cloudfront:GetFunction", "e")
             with open(out, "rb") as f:
                 return f.read(), doc["e"]
 
@@ -192,7 +216,7 @@ class CliAws:
                             ["cloudfront", "update-function", f"--name={name}", f"--if-match={if_match}",
                              f"--function-config=file://{gp}", f"--function-code=fileb://{cp}"],
                             region="us-east-1", query="{e:ETag}")
-        return doc["e"]
+        return _need(doc, "cloudfront:UpdateFunction", "e")["e"]
 
     def cf_test_function(self, name, if_match, event):
         """Returns {'output': str|None, 'error': bool}. Logs, utilisation and error text are
@@ -206,13 +230,14 @@ class CliAws:
                              "--stage=DEVELOPMENT", f"--event-object=fileb://{ep}"],
                             region="us-east-1",
                             query="{o:TestResult.FunctionOutput,f:TestResult.FunctionErrorMessage}")
+        _need(doc, "cloudfront:TestFunction")
         return {"output": doc.get("o"), "error": bool(doc.get("f"))}
 
     def cf_publish_function(self, name, if_match):
         doc = self._run("cloudfront:PublishFunction",
                         ["cloudfront", "publish-function", f"--name={name}", f"--if-match={if_match}"],
                         region="us-east-1", query="{s:FunctionSummary.Status}")
-        return doc.get("s")
+        return _need(doc, "cloudfront:PublishFunction").get("s")
 
     def cf_create_invalidation(self, distribution_id, paths, caller_reference):
         with tempfile.TemporaryDirectory(prefix="cf-") as d:
@@ -224,10 +249,10 @@ class CliAws:
                             ["cloudfront", "create-invalidation", f"--distribution-id={distribution_id}",
                              f"--invalidation-batch=file://{bp}"], region="us-east-1",
                             query="{i:Invalidation.Id}")
-        return doc["i"]
+        return _need(doc, "cloudfront:CreateInvalidation", "i")["i"]
 
     def cf_get_invalidation(self, distribution_id, inv_id):
         doc = self._run("cloudfront:GetInvalidation",
                         ["cloudfront", "get-invalidation", f"--distribution-id={distribution_id}", f"--id={inv_id}"],
                         region="us-east-1", query="{s:Invalidation.Status}")
-        return doc["s"]
+        return _need(doc, "cloudfront:GetInvalidation", "s")["s"]

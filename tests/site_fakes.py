@@ -102,20 +102,40 @@ class FakeAws:
         if multipart:
             parts = [hashlib.md5(data[i:i + 8 * 1024 * 1024]).digest() for i in range(0, len(data), 8 * 1024 * 1024)]
             etag = hashlib.md5(b"".join(parts)).hexdigest() + f"-{len(parts)}"
-        b[key] = {"data": data, "etag": etag, "ct": ct, "cc": cc}
+        b[key] = {"data": data, "etag": etag, "ct": ct, "cc": cc, "lm": f"2026-10-27T10:{self._tick():05d}Z"}
+
+    def set_meta(self, bucket, key, ct=None, cc=None):
+        """A metadata-only change (copy-object in place): same ETag, new LastModified."""
+        o = self.buckets[bucket][key]
+        if ct is not None:
+            o["ct"] = ct
+        if cc is not None:
+            o["cc"] = cc
+        o["lm"] = f"2026-10-27T11:{self._tick():05d}Z"
 
     def list_objects(self, bucket):
         self._call("s3:ListObjectsV2", bucket)
-        return {k: {"etag": v["etag"], "size": len(v["data"])} for k, v in self.buckets.get(bucket, {}).items()}
+        return {k: {"etag": v["etag"], "size": len(v["data"]), "last_modified": v["lm"]}
+                for k, v in self.buckets.get(bucket, {}).items()}
 
     def get_object(self, bucket, key, dest):
+        return self.get_object_meta(bucket, key, dest)["etag"]
+
+    def get_object_meta(self, bucket, key, dest):
         self._call("s3:GetObject", bucket, key)
         o = self.buckets.get(bucket, {}).get(key)
         if o is None:
             raise site_aws.NotFound("s3:GetObject", "NoSuchKey")
         with open(dest, "wb") as f:
             f.write(o["data"])
-        return o["etag"]
+        return {"etag": o["etag"], "content_type": o["ct"], "cache_control": o["cc"]}
+
+    def head_object(self, bucket, key):
+        self._call("s3:HeadObject", bucket, key)
+        o = self.buckets.get(bucket, {}).get(key)
+        if o is None:
+            raise site_aws.NotFound("s3:HeadObject", "404")
+        return {"etag": o["etag"], "content_type": o["ct"], "cache_control": o["cc"]}
 
     def put_object(self, bucket, key, path, content_type, cache_control, sha256_b64, if_match=None, if_none_match=False):
         self._call("s3:PutObject", bucket, key)
@@ -131,7 +151,8 @@ class FakeAws:
             raise site_aws.AwsError("s3:PutObject", "PreconditionFailed")
         if if_match and (cur is None or cur["etag"] != if_match):
             raise site_aws.AwsError("s3:PutObject", "PreconditionFailed")
-        b[key] = {"data": data, "etag": md5(data), "ct": content_type, "cc": cache_control}
+        b[key] = {"data": data, "etag": md5(data), "ct": content_type, "cc": cache_control,
+                  "lm": f"2026-10-27T12:{self._tick():05d}Z"}
         return b[key]["etag"]
 
     def delete_object(self, bucket, key, if_match):

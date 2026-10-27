@@ -5,7 +5,8 @@ Two inputs are validated here:
 
   policy/site/<owner>/<repo>.json   TRUSTED, in deploy-workflows (a PR by Tobi). Chosen by the
                                     run's github.repository, never by an input. Account, region,
-                                    bucket, the keys and prefixes the site may use (SITE), the
+                                    bucket, the keys and prefixes the site may use (SITE) and their
+                                    allowed cache classes, the
                                     manifest location, the Lambda and its member allowlist, the
                                     gate (CloudFront Function) and its test cases, the
                                     distribution, the smoke checks.
@@ -222,8 +223,8 @@ HEADER_VALUE_RE = r"[\x20-\x7e]{0,512}"
 def validate_policy(doc, repository=None):
     """Validate a trusted site policy; returns the normalised dict (raises PolicyError)."""
     _exact_fields(doc, ["schema", "kind", "repository", "target", "account_id", "region", "bucket",
-                        "root_keys", "prefixes", "browser_code_sources", "manifest", "lambda", "gate",
-                        "distribution_id", "smoke"], ["max_objects", "max_deletes"])
+                        "root_keys", "prefixes", "allowed_cache", "browser_code_sources", "manifest", "lambda",
+                        "gate", "distribution_id", "smoke"], ["max_objects", "max_deletes"])
     _expect(doc["schema"] == POLICY_SCHEMA, "policy schema must be 1")
     _expect(doc["kind"] == "site", "policy kind must be 'site'")
     _str(doc["repository"], r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", "repository")
@@ -253,6 +254,15 @@ def validate_policy(doc, repository=None):
             _expect(a == b or not a.startswith(b), f"prefixes overlap: {a!r} / {b!r}")
         for r in roots:
             _expect(not r.startswith(a), f"root key {r!r} lies under prefix {a!r}")
+
+    # Cache-Control is pinned per root key / prefix (Guardian on f944888, M1): a box-chosen
+    # "immutable" on index.html or sw.js would stick in browsers for a year.
+    ac = doc["allowed_cache"]
+    _expect(isinstance(ac, dict) and set(ac) == set(roots) | set(prefixes),
+            "allowed_cache must have exactly one entry per root key and prefix")
+    for k, v in ac.items():
+        _expect(isinstance(v, list) and v and all(c in CACHE_CLASSES for c in v) and len(set(v)) == len(v),
+                f"allowed_cache[{k!r}] must be a non-empty list of cache classes")
 
     srcs = doc["browser_code_sources"]
     _expect(isinstance(srcs, list) and srcs, "browser_code_sources must be a non-empty list")
@@ -328,6 +338,15 @@ def validate_policy(doc, repository=None):
         if "body_sha256_of_key" in c:
             check_key(c["body_sha256_of_key"], "smoke check key")
     return doc
+
+
+def allowed_cache_for(policy, key):
+    if key in policy["root_keys"]:
+        return policy["allowed_cache"][key]
+    for p in policy["prefixes"]:
+        if key.startswith(p):
+            return policy["allowed_cache"][p]
+    return []
 
 
 def in_site(policy, key):
@@ -425,6 +444,9 @@ def expand_mappings(site, policy, tree):
         check_key(key, f"{where} key")
         _expect(in_site(policy, key), f"{where}: key {key!r} is outside the policy's SITE")
         _expect(key not in out, f"{where}: key {key!r} is produced by two mappings (overlap)")
+        _expect(cache in allowed_cache_for(policy, key),
+                f"{where}: cache class {cache!r} is not allowed for {key!r} by the policy "
+                f"(allowed: {allowed_cache_for(policy, key)})")
         out[key] = (src, cache)
 
     for i, mp in enumerate(site["mappings"]):

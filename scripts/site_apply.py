@@ -137,12 +137,13 @@ def verify_inputs(bundle_path, summary_path, bundle_sha256, digest, sha, reposit
     # The manifest is built from `desired`: it must describe SITE keys with table values only.
     for k, d in plan["desired"].items():
         sp.check_key(k)
-        if not sp.in_site(policy, k) or d.get("cache") not in sp.CACHE_CLASSES \
+        if not sp.in_site(policy, k) or d.get("cache") not in sp.allowed_cache_for(policy, k) \
                 or sp.classify(k, k)[1] != d.get("content_type") or not re.fullmatch(r"[0-9a-f]{64}", d.get("sha256", "")):
             raise ApplyRefused(f"desired entry {k} is outside the policy or the tables")
     for p in plan["puts"]:
         want = plan["desired"].get(p["key"])
-        if want is None or want["sha256"] != p["sha256"] or want["size"] != p["size"]:
+        if want is None or want["sha256"] != p["sha256"] or want["size"] != p["size"] \
+                or sp.CACHE_CLASSES[want["cache"]] != p["cache_control"] or want["content_type"] != p["content_type"]:
             raise ApplyRefused(f"put {p['key']} does not match the desired manifest")
     lam = plan.get("lambda")
     if lam:
@@ -231,7 +232,9 @@ class Applier:
         pre = self.plan["prestate"]
         pol = self.policy
         listing = self.aws.list_objects(pol["bucket"])
-        if {k: v["etag"] for k, v in listing.items()} != pre["listing"]:
+        lm = pre.get("last_modified")
+        if {k: v["etag"] for k, v in listing.items()} != pre["listing"] or \
+                (lm is not None and {k: v.get("last_modified", "") for k, v in listing.items()} != lm):
             changed = sorted(set(listing) ^ set(pre["listing"]) |
                              {k for k in listing if k in pre["listing"] and listing[k]["etag"] != pre["listing"][k]})
             raise ApplyRefused(f"live S3 changed since the plan ({len(changed)} keys, e.g. {changed[:3]}): plan again")
@@ -402,6 +405,17 @@ class Applier:
 
     def write_manifest(self, sha, plan_run_id):
         doc = self.manifest_doc(sha, plan_run_id)
+        # LastModified per key from a fresh listing: a later in-place metadata change (copy-object
+        # keeps the ETag) then shows as drift. Entries whose ETag no longer matches lose it.
+        try:
+            now = self.aws.list_objects(self.policy["bucket"])
+        except site_aws.AwsError:
+            now = {}
+        for k, o in doc["objects"].items():
+            o.pop("last_modified", None)
+            lv = now.get(k)
+            if lv and lv["etag"] == o["etag"] and lv.get("last_modified"):
+                o["last_modified"] = lv["last_modified"]
         data = (json.dumps(doc, indent=1, sort_keys=True) + "\n").encode()
         path = os.path.join(self.workdir, "manifest-new.json")
         with open(path, "wb") as f:
@@ -433,8 +447,8 @@ class Applier:
                     result = "ok"
                     break
                 self.sleep(20)
-        except site_aws.AwsError as e:
-            self.log(f"invalidation: {e}")
+        except (site_aws.AwsError, KeyError, TypeError) as e:
+            self.log(f"invalidation: {e if isinstance(e, site_aws.AwsError) else e.__class__.__name__}")
         self.log(f"invalidation ({len(paths)} path(s)): {result}")
         _check(checks_dir, "invalidation", result)
 
@@ -530,7 +544,10 @@ def main(argv=None, aws=None, lfs=None, sleep=time.sleep, http_get=http_get_no_r
     ap.add_argument("--github-output")
     ap.add_argument("--verify-only", action="store_true")
     args = ap.parse_args(argv)
-    log = out or (lambda s: print(s, flush=True))
+    _log = out or (lambda s: print(s, flush=True))
+
+    def log(msg):
+        _log(sd.one_line(str(msg)))
 
     def output(k, v):
         if args.github_output:
@@ -583,11 +600,24 @@ def main(argv=None, aws=None, lfs=None, sleep=time.sleep, http_get=http_get_no_r
         if wrote:
             output("partial", "true")
         return 2 if wrote else 1
+    except Exception as e:  # noqa: BLE001 - last resort: record what happened, never a raw traceback
+        wrote = bool(applier and applier.wrote)
+        log(f"::error::Deploy {'FAILED after writes' if wrote else 'not applied, nothing written'}: "
+            f"internal error {e.__class__.__name__}")
+        output("applied", "false")
+        if wrote:
+            output("partial", "true")
+        return 2 if wrote else 1
     finally:
         shutil.rmtree(work, ignore_errors=True)
     output("applied", "true")
-    applier.invalidate(args.checks_dir)
-    applier.smoke(args.checks_dir)
+    # Post-apply checks never turn an applied deploy into a failure (or a traceback).
+    for name, step in (("invalidation", applier.invalidate), ("smoke", applier.smoke)):
+        try:
+            step(args.checks_dir)
+        except Exception as e:  # noqa: BLE001
+            log(f"{name}: check failed ({e.__class__.__name__})")
+            _check(args.checks_dir, name, "failed")
     return 0
 
 

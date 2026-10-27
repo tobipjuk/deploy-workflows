@@ -98,6 +98,35 @@ def text_diff(old, new, old_label, new_label):
     return "\n".join(lines) + ("\n" if lines else ""), added, removed, invis
 
 
+def one_line(s):
+    """Escape control characters so a message can't start a new line (and with it a GitHub
+    workflow command such as ::add-mask:: or ::stop-commands::) in the log or the summary."""
+    return "".join(ch if ch >= " " and ch != "\x7f" else f"\\x{ord(ch):02x}" for ch in s)
+
+
+def count_nonascii_letters_added(diff_text):
+    """Letters outside ASCII and combining marks in a diff's added lines (homoglyph hint)."""
+    n = 0
+    for ln in diff_text.split("\n"):
+        if ln.startswith("+") and not ln.startswith("+++"):
+            for ch in ln:
+                if ord(ch) > 127 and unicodedata.category(ch)[0] in ("L", "M"):
+                    n += 1
+    return n
+
+
+def cap_attention(items):
+    """At most MAX_ATTENTION entries; invisible/bidi entries are never dropped (Guardian L4)."""
+    if len(items) <= MAX_ATTENTION:
+        return items, False
+    keep_always = [a for a in items if a["label"] == "Invisible or bidi characters"]
+    rest = [a for a in items if a["label"] != "Invisible or bidi characters"]
+    room = max(MAX_ATTENTION - 1 - len(keep_always), 0)
+    dropped = len(rest) - room
+    kept = order_attention(keep_always + rest[:room])
+    return kept + [_att("*", "More", "info", None, None, f"{dropped} more (full list in the attachment)")], True
+
+
 def count_invisible(s):
     return sum(1 for ch in s if is_invisible(ch))
 
@@ -198,44 +227,64 @@ def is_code_key(key):
     return sp.ext_of(key).lower() in sp.CODE_TYPES
 
 
-def compute_s3(policy, desired, live, manifest, live_text, binary_match, adoption):
+def compute_s3(policy, desired, live, manifest, live_text, binary_match, adoption, live_meta=None):
     """Decide S3 operations.
 
-    desired:      {key: {class, content_type, cache, sha256, size, source}}
-    live:         {key: {etag, size}} from ListObjectsV2 (the whole bucket)
-    manifest:     None (adoption) or {key: {sha256, size, etag, ...}}
+    desired:      {key: {class, content_type, cache_control, cache, sha256, size, source}}
+    live:         {key: {etag, size, last_modified}} from ListObjectsV2 (the whole bucket)
+    manifest:     None (adoption) or {key: {sha256, size, etag, content_type, cache, last_modified?}}
     live_text:    {key: bytes} live bytes of text keys that exist live
     binary_match: callable(key) -> True/False for adoption of binary keys by ETag (M3)
-    Returns dict with puts, deletes, adopted, drift, outside.
+    live_meta:    {key: {content_type, cache_control}} read from AWS: every live text key (GET)
+                  and, in adoption, every binary key that matched by ETag (HEAD)
+    An object is unchanged only if its bytes AND its Content-Type and Cache-Control are the
+    desired ones (Guardian on f944888, M1); a metadata-only difference is an update with
+    reason "metadata". Returns dict with puts, deletes, adopted, drift, outside.
     """
+    live_meta = live_meta or {}
     puts, deletes, adopted, drift, outside = [], [], [], [], []
     for key in sorted(desired):
         d = desired[key]
         lv = live.get(key)
         m = (manifest or {}).get(key)
+        trusted = False  # the manifest entry describes the live object
         if manifest is not None:
             if m is not None and lv is None:
                 drift.append({"key": key, "what": "in the manifest but missing live"})
             elif m is not None and m["etag"] != lv["etag"]:
                 drift.append({"key": key, "what": "live ETag differs from the manifest (changed outside the pipeline)"})
+            elif m is not None and m.get("last_modified") and m["last_modified"] != lv.get("last_modified"):
+                drift.append({"key": key, "what": "live object rewritten outside the pipeline (LastModified; "
+                                                  "metadata may differ)"})
             elif m is None and lv is not None:
                 drift.append({"key": key, "what": "live object not in the manifest"})
+            else:
+                trusted = m is not None
         if lv is None:
-            puts.append({"key": key, "action": "create", "if_match": None})
+            puts.append({"key": key, "action": "create", "if_match": None, "reason": "new",
+                         "live_content_type": None, "live_cache_control": None})
             continue
+        meta = live_meta.get(key)
         if d["class"] in ("code", "data"):
-            same = key in live_text and sha256_hex(live_text[key]) == d["sha256"]
-        elif manifest is not None and m is not None and m["etag"] == lv["etag"]:
-            same = m["sha256"] == d["sha256"] and m["size"] == d["size"]
+            same_bytes = key in live_text and sha256_hex(live_text[key]) == d["sha256"]
+        elif trusted:
+            same_bytes = m["sha256"] == d["sha256"] and m["size"] == d["size"]
+            meta = {"content_type": m.get("content_type"),
+                    "cache_control": sp.CACHE_CLASSES.get(m.get("cache"), m.get("cache"))}
         elif manifest is None:
-            same = lv["size"] == d["size"] and binary_match(key)
+            same_bytes = lv["size"] == d["size"] and binary_match(key)
         else:
-            same = False  # drifted binary: re-upload the commit's bytes
-        if same:
-            if m is None or m["etag"] != lv["etag"] or m["sha256"] != d["sha256"]:
+            same_bytes = False  # drifted binary: re-upload the commit's bytes
+        same_meta = meta is not None and meta.get("content_type") == d["content_type"] \
+            and meta.get("cache_control") == d["cache_control"]
+        if same_bytes and same_meta:
+            if m is None or not trusted or m["sha256"] != d["sha256"]:
                 adopted.append(key)
         else:
-            puts.append({"key": key, "action": "update", "if_match": lv["etag"]})
+            puts.append({"key": key, "action": "update", "if_match": lv["etag"],
+                         "reason": "metadata" if same_bytes else "content",
+                         "live_content_type": (meta or {}).get("content_type"),
+                         "live_cache_control": (meta or {}).get("cache_control")})
     for key in sorted(live):
         if key in desired:
             continue
@@ -323,11 +372,15 @@ def _att(address, label, action, path=None, before=None, after=None):
     return {"address": address, "label": label, "action": action, "path": path, "before": before, "after": after}
 
 
+LONG_CACHE = ("long", "immutable", "private-immutable")
+
 ATTENTION_ORDER = [
+    "Invisible or bidi characters",
     "Gate code", "Gate DEVELOPMENT differs from LIVE", "Lambda code", "PIN page", "Service worker",
+    "Cache-Control or Content-Type",
     "New or renamed Lambda member", "Non-text member in the live Lambda zip",
     "Delete of a root or code key", "LIVE DRIFT", "Settings mismatch",
-    "Invisible or bidi characters", "BASELINE ADOPTION",
+    "Non-ASCII letters or combining marks in code", "BASELINE ADOPTION",
 ]
 
 
