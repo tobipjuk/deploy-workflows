@@ -37,6 +37,7 @@ Chosen by `github.repository`; inputs may only agree with it. Onboarding is a re
 | `repository`, `target` | the repo; the deploy target name (= Orion's registration) |
 | `account_id`, `region`, `bucket` | the site bucket's account, region, name |
 | `root_keys`, `prefixes` | SITE: the keys and prefixes the site may use. Nothing outside is ever written or deleted |
+| `allowed_cache` | one entry per root key and prefix: the cache classes `deploy/site.json` may choose there (e.g. `sw.js: ["no-cache"]`, `index.html: ["short", "no-cache"]`). Anything else refuses the plan |
 | `browser_code_sources` | repo prefixes types a browser runs may come from (`site/`) |
 | `manifest` | `{bucket, key}` of `deployed-manifest.json` (a separate, versioned, private bucket) |
 | `lambda` | `function_name`, `source_dir`, `members` (flat `*.py` allowlist, no stdlib/runtime names), `ignore` (globs of `.py` files in `source_dir` that aren't members, e.g. `test_*.py`) |
@@ -60,7 +61,8 @@ Chosen by `github.repository`; inputs may only agree with it. Onboarding is a re
 
 Unknown fields, keys outside SITE, a key produced twice, a mapping that matches no file and
 more than `max_objects` refuse the plan. `cache` is one of `no-cache`, `short`, `long`,
-`immutable`, `private-short`, `private-day`, `private-immutable` (`site_policy.CACHE_CLASSES`).
+`immutable`, `private-short`, `private-day`, `private-immutable` (`site_policy.CACHE_CLASSES`),
+and must be in the policy's `allowed_cache` for that root key or prefix.
 `lambda_settings` is never applied: a difference from live makes the plan **not deployable**
 ("change it on the Mac first"). Content types come only from the extension table, checked on
 both the key and the source (they must agree).
@@ -88,6 +90,16 @@ that doesn't fit (`diff_complete: false`), a summary too large, no deploy role.
 when a live key of the same size exists; other new LFS objects are existence-checked and
 range-read for an unverified magic check (the apply verifies in full).
 
+**Metadata** (Guardian on f944888, M1): an object is unchanged only if its bytes **and** its
+`Content-Type` and `Cache-Control` are the desired ones. Text keys: from the same GetObject that
+reads their bytes. Binary keys: in adoption a HEAD (8 in parallel) for every live key of the
+right size; in steady state the manifest's values, trusted only while the live ETag **and**
+LastModified equal the manifest's (an in-place `copy-object` keeps the ETag but not
+LastModified, so it shows as LIVE DRIFT and the object is re-uploaded). A metadata-only
+difference is an `update` (no diff text). NEEDS ATTENTION "Cache-Control or Content-Type" fires
+for a root or code key whose Content-Type or Cache-Control changes, and for a new one created
+with `long`, `immutable` or `private-immutable`.
+
 **Steady state**: the manifest is cross-checked against the live listing; any difference is
 LIVE DRIFT (a drifted binary is re-uploaded; a live object in SITE that isn't in the manifest is
 deleted; outside SITE it's not deployable). Text keys are always diffed against their live bytes.
@@ -113,10 +125,12 @@ form), `counts`, `has_changes`, `destructive`, `deployable`, `blocked` (always `
 | `site.settings_mismatch` | `{field, expected, live}` |
 | `site.plan_sha256` | sha256 of the bundle's `plan.json`: binds summary and bundle |
 
-NEEDS ATTENTION order (labels): Gate code, Gate DEVELOPMENT differs from LIVE, Lambda code,
-PIN page, Service worker, New or renamed Lambda member, Non-text member in the live Lambda zip,
-Delete of a root or code key, LIVE DRIFT, Settings mismatch, Invisible or bidi characters,
-BASELINE ADOPTION. Up to 60 entries (drift over 20 keys is one entry).
+NEEDS ATTENTION order (labels): Invisible or bidi characters, Gate code, Gate DEVELOPMENT
+differs from LIVE, Lambda code, PIN page, Service worker, Cache-Control or Content-Type, New or
+renamed Lambda member, Non-text member in the live Lambda zip, Delete of a root or code key,
+LIVE DRIFT, Settings mismatch, Non-ASCII letters or combining marks in code, BASELINE ADOPTION.
+Up to 60 entries (drift over 20 keys is one entry); invisible/bidi entries are never dropped by
+the cap (Guardian L4).
 
 ## Bundle and manifest
 
@@ -129,7 +143,10 @@ sha256.
 
 `deployed-manifest.json` (written only by the deploy role, `If-Match`/`If-None-Match: *`):
 `{schema: 1, repository, bucket, commit, plan_run_id, written_at, objects: {key: {sha256, size,
-etag, content_type, cache}}, lambda: {code_sha256, members: {name: sha256}}, gate: {live_sha256}}`.
+etag, content_type, cache, last_modified}}, lambda: {code_sha256, members: {name: sha256}},
+gate: {live_sha256}}`. `content_type` and `cache` are what is live (checked or written by the
+pipeline); `last_modified` comes from a listing after the writes. The pre-state also records
+every key's LastModified, and the apply refuses if one changed since the plan.
 After a failure it records only what was written; keys left half-way show as drift next time.
 
 ## Apply
@@ -166,7 +183,8 @@ Needs real AWS/GitHub, at build time (Tobi's Mac or the first pipeline runs):
 | B6 | The site bucket uses SSE-S3 (ETags are MD5s, no KMS needed; `kms:*` is denied) | `get-bucket-encryption` |
 | B7 | The Lambda code `Location` host ends in `.amazonaws.com` | first plan |
 | B8 | The real gate passes the three policy test cases in TestFunction (event shape `version 1.0`) | first apply (or a Mac `test-function` run with the same event JSON) |
-| B9 | Plan role reads of text keys only: GetObject on a `.webp` is denied, on `.html` allowed | policy simulator |
+| B9 | Plan role: GetObject/HeadObject allowed on SITE keys, denied elsewhere in the bucket and on every write | policy simulator |
+| B10 | Does an `s3:ListBucket` allow with the condition `s3:prefix = deployed-manifest.json` turn a missing manifest's 403 into a 404 (`NoSuchKey`)? It should (S3 checks ListBucket for the key being asked for), but S3 docs only promise it for unconditional ListBucket. **Fallback:** unconditional `s3:ListBucket` on the dedicated manifest bucket (it holds only the manifest) | `get-object` of a missing manifest as each role, before the adoption plan |
 
 ## Where this differs from the design (revision 3)
 
@@ -176,6 +194,12 @@ Needs real AWS/GitHub, at build time (Tobi's Mac or the first pipeline runs):
    already in the list); the design's role tables need the extra resource.
 2. **Plan role's NotAction deny** uses the plan role's own six actions, not the deploy role's
    14 (stricter; the design said "the same NotAction deny").
+   - **Plan role reads all of SITE, not only text keys** (Guardian on f944888, M1): HeadObject on
+   binaries (adoption) is authorised as `s3:GetObject`. Nothing in SITE is secret (round 4 H1).
+   - **Content-Type and Cache-Control are reconciled** (M1): the design compared bytes/ETags
+   only, so a box-chosen `immutable` on `index.html` could ride along unseen. Now pinned per root
+   key/prefix in the trusted policy (`allowed_cache`), compared with live, and shown.
+   - **Invisible/bidi characters rank first** in NEEDS ATTENTION and are exempt from the cap (L4).
 3. **File names:** the design's `site_plan.py` is split into `site_plan.py` (I/O) and
    `site_diff.py` (pure diff logic); `site_bundle.py`, `site_aws.py` and `site_iam.py` are extra.
 4. **Exact-set run shape for Terraform too:** `check_plan_run.py` now requires exactly
@@ -187,3 +211,19 @@ Needs real AWS/GitHub, at build time (Tobi's Mac or the first pipeline runs):
 7. **Not built here:** the module's `pipeline = "site"` (roles, trust, the site bucket out of the
    object-read deny, `cloudfront-keyvaluestore:*` in the data guard), Orion's side, `mac/onboard.sh`
    site support, the lego callers and `infra/ci`.
+
+## Known limits (Guardian on f944888, info)
+
+- **L5: TestFunction is not a boundary.** The gate tests run box-written code on the DEVELOPMENT
+  stage before it goes live, and their inputs are in the policy (predictable): a malicious gate
+  can recognise the test events and behave. The tests catch mistakes, not an attacker; the gate
+  diff on the card (first in NEEDS ATTENTION) is what Tobi approves.
+- **L6: the deploy role's API parameters are wider than the code uses.** IAM can't limit, for
+  example, `UpdateFunctionCode` to a zip (vs. an S3 location or image), `PutObject` to the
+  content types and cache classes of the tables, `CreateInvalidation` paths, or
+  `UpdateFunction`'s config (runtime, key store association). The trusted code uses only the
+  narrow forms; anyone holding the role's credentials could use the wide ones on the same
+  resources. The role is only issued to `site-apply.yml@main` dispatched by the App, attempt 1.
+- **L7: homoglyphs.** Added code lines with letters outside ASCII or combining marks get a NEEDS
+  ATTENTION entry ("Non-ASCII letters or combining marks in code", count only). It is a hint:
+  legitimate text (accents, emoji) triggers it too, and confusables inside ASCII (`l`/`1`) don't.
