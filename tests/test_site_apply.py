@@ -65,7 +65,6 @@ def run_apply(env, outputs=None, digest=None, bundle_sha=None, allow_destroy=Fal
     return rc, "\n".join(lines) + err.getvalue()
 
 
-_plan_outputs = {}
 
 
 def plan_outputs(env):
@@ -191,7 +190,7 @@ class DriftTest(unittest.TestCase):
         self.assert_refused("gate changed")
 
 
-class TamperTest(unittest.TestCase):
+class TamperBase(unittest.TestCase):
     def setUp(self):
         self.env = F.Env(self)
         planned(self.env)
@@ -206,17 +205,19 @@ class TamperTest(unittest.TestCase):
         self.assertIn(needle, log)
         self.assertEqual(self.env.aws.writes(), [])
 
-    def test_wrong_bundle_sha(self):
-        self.assert_refused("not the approved one", bundle_sha="0" * 64)
-
-    def test_wrong_digest(self):
-        self.assert_refused("changes_digest", digest="0" * 64)
-
     def rewrite_summary(self, fn):
         p = self.env.out / "plan-summary.json"
         d = json.loads(p.read_text())
         fn(d)
         p.write_text(json.dumps(d))
+
+
+class TamperTest(TamperBase):
+    def test_wrong_bundle_sha(self):
+        self.assert_refused("not the approved one", bundle_sha="0" * 64)
+
+    def test_wrong_digest(self):
+        self.assert_refused("changes_digest", digest="0" * 64)
 
     def test_summary_lies_about_plan(self):
         self.rewrite_summary(lambda d: d["site"].__setitem__("plan_sha256", "0" * 64))
@@ -413,6 +414,53 @@ class DestroyTest(unittest.TestCase):
         self.assertEqual(rc, 0, log)
         self.assertFalse(any(k.startswith("pages/old/") for k in env.aws.buckets[env.policy["bucket"]]))
 
+
+
+class DesiredTamperTest(TamperBase):
+    """Defence in depth: even a plan.json that is consistently re-bundled and re-summarised
+    (which the attestation prevents) can't put keys outside SITE into the manifest."""
+
+    def rebundle(self, mutate):
+        import hashlib
+        import site_bundle
+        import site_policy as sp
+        p = self.env.out / "plan-bundle.tar"
+        with tarfile.open(p) as t:
+            plan_doc = json.loads(t.extractfile("plan.json").read())
+            src = t.extractfile("SOURCE").read().decode().strip()
+            blobs = {m.name[6:]: t.extractfile(m).read() for m in t.getmembers() if m.name.startswith("blobs/")}
+        mutate(plan_doc)
+        new = site_bundle.create(str(p), src, plan_doc, blobs)
+        psha = hashlib.sha256(site_bundle.canonical_json(plan_doc)).hexdigest()
+
+        def fix(d):
+            d["bundle_sha256"] = new
+            d["site"]["plan_sha256"] = psha
+        self.rewrite_summary(fix)
+        pol, polsha = sp.load_policy(str(F.POLICY_DIR), F.REPOSITORY)
+        return lambda: site_apply.verify_inputs(str(p), str(self.env.out / "plan-summary.json"), new,
+                                                self.env.plan_out["digest"], self.env.sha, F.REPOSITORY,
+                                                pol, polsha, False)
+
+    def test_desired_outside_site(self):
+        run = self.rebundle(lambda d: d["desired"].__setitem__("admin/x.html", dict(d["desired"]["index.html"])))
+        with self.assertRaises(site_apply.ApplyRefused):
+            run()
+
+    def test_desired_wrong_content_type(self):
+        run = self.rebundle(lambda d: d["desired"]["index.html"].__setitem__("content_type", "text/plain"))
+        with self.assertRaises(site_apply.ApplyRefused):
+            run()
+
+    def test_put_differs_from_desired(self):
+        run = self.rebundle(lambda d: d["desired"]["index.html"].__setitem__("sha256", "0" * 64))
+        with self.assertRaises(site_apply.ApplyRefused):
+            run()
+
+    def test_consistent_rebundle_passes(self):
+        """Control: the same path with no mutation verifies, so the refusals above are real."""
+        run = self.rebundle(lambda d: None)
+        run()
 
 if __name__ == "__main__":
     unittest.main()

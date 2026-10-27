@@ -132,6 +132,18 @@ def verify_inputs(bundle_path, summary_path, bundle_sha256, digest, sha, reposit
         sp.check_key(d["key"])
         if not sp.in_site(policy, d["key"]) or not d.get("if_match"):
             raise ApplyRefused(f"delete outside SITE or unconditional: {d['key']}")
+        if d["key"] in plan["desired"]:
+            raise ApplyRefused(f"{d['key']} is both deleted and desired")
+    # The manifest is built from `desired`: it must describe SITE keys with table values only.
+    for k, d in plan["desired"].items():
+        sp.check_key(k)
+        if not sp.in_site(policy, k) or d.get("cache") not in sp.CACHE_CLASSES \
+                or sp.classify(k, k)[1] != d.get("content_type") or not re.fullmatch(r"[0-9a-f]{64}", d.get("sha256", "")):
+            raise ApplyRefused(f"desired entry {k} is outside the policy or the tables")
+    for p in plan["puts"]:
+        want = plan["desired"].get(p["key"])
+        if want is None or want["sha256"] != p["sha256"] or want["size"] != p["size"]:
+            raise ApplyRefused(f"put {p['key']} does not match the desired manifest")
     lam = plan.get("lambda")
     if lam:
         z = b["lambda_zip"]
