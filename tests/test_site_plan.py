@@ -446,5 +446,26 @@ class DiffUnitTest(unittest.TestCase):
         self.assertEqual((r, inv), (0, 1))
 
 
+
+class LargeTextTest(unittest.TestCase):
+    def test_huge_data_file_listed_without_diff_huge_code_not_deployable(self):
+        env = F.Env(self)
+        adopt(env)
+        env.commit({"building-instructions/community/clock/model.ldr": b"0 x\n" * 300000})
+        rc, log = run_plan(env, event="push")
+        self.assertEqual(rc, 0, log)
+        doc = summary(env)
+        self.assertTrue(doc["deployable"])
+        self.assertTrue(doc["site"]["data_diffs_truncated"])
+        os.unlink(env.out / "plan-summary.json")
+        os.unlink(env.out / "plan-bundle.tar")
+        env.commit({"site/sw.js": b"//" + b"x" * 1_100_000 + b"\n"})
+        rc, log = run_plan(env, event="push")
+        self.assertEqual(rc, 0, log)
+        doc = summary(env)
+        self.assertFalse(doc["deployable"])
+        self.assertFalse(doc["diff_complete"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -69,5 +69,14 @@ class DeployResultTest(unittest.TestCase):
         self.assertEqual(doc["status"], "deployed_with_warnings")
 
 
+
+class PartialTest(unittest.TestCase):
+    def test_partial_site_apply_is_failed_with_a_note(self):
+        status, text = dr.summarise(False, {}, partial=True)
+        self.assertEqual(status, "failed")
+        self.assertIn("partially applied", text)
+        self.assertEqual(dr.build({"APPLY_OUTCOME": "failure", "PARTIAL": "true"}, {})["status"], "failed")
+
+
 if __name__ == "__main__":
     unittest.main()

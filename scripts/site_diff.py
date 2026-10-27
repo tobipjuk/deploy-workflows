@@ -25,6 +25,7 @@ MAX_LIVE_ZIP_UNCOMPRESSED = 100 * 1024 * 1024
 MAX_SUMMARY_BYTES = 1_800_000      # Orion refuses a plan-summary.json > 2 MB
 MAX_CODE_DIFF_BYTES = 1_200_000
 MAX_ATTENTION = 60
+MAX_TEXT_DIFF_INPUT = 1_000_000  # characters per side; larger text files aren't diffed
 DIFF_CONTEXT = 3
 
 # Characters that render as nothing or reorder text. Escaped in every diff line and counted.
@@ -357,6 +358,11 @@ def fit_diffs(diffs):
     kept, used, code_complete, data_truncated = [], 0, True, False
     for d in sorted(diffs, key=diff_rank):
         n = len(d["text"].encode("utf-8")) + 200
+        if d.get("too_large"):
+            if d["kind"] == "code":
+                code_complete = False
+            else:
+                data_truncated = True
         if d["kind"] == "code":
             if used + n > MAX_CODE_DIFF_BYTES:
                 code_complete = False

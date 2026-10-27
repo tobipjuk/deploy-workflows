@@ -1,0 +1,241 @@
+# Reusable: apply an approved, attested site plan with the project's deploy role.
+#
+# Called from the project's .github/workflows/deploy.yml (workflow_dispatch only), which Orion's
+# approver GitHub App dispatches after Tobi taps Approve in Telegram (docs/orion-interface.md):
+#
+#   on:
+#     workflow_dispatch:
+#       inputs: { plan_run_id, bundle_sha256, changes_digest, allow_destroy }
+#   jobs:
+#     deploy:
+#       uses: tobipjuk/deploy-workflows/.github/workflows/site-apply.yml@main
+#       permissions: { id-token: write, contents: read, actions: read }
+#       with: { target: ..., aws_region: ..., aws_account_id: ..., deploy_role_arn: ..., approver_app_slug: ... }
+#
+# Who may apply is decided by AWS: the deploy role trusts only an OIDC sub of
+#   repo:<o>/<r>:ref:refs/heads/main:event_name:workflow_dispatch:actor:<app-slug>[bot]
+#   :run_attempt:1:job_workflow_ref:tobipjuk/deploy-workflows/.github/workflows/site-apply.yml@refs/heads/main
+# The checks below are defence in depth and make refusals readable. The approval data is read
+# from the dispatch EVENT (github.event.inputs), never from `with:`.
+#
+# No checkout: everything the apply writes comes from the attested bundle (plain-git bytes, the
+# Lambda zip, the gate code) or from GitHub's LFS store, verified against the plan's oids. The
+# trusted site policy decides bucket, keys, functions, distribution, gate tests and smoke checks.
+name: site-apply (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        type: string
+        required: true
+      aws_region:
+        type: string
+        required: true
+      aws_account_id:
+        type: string
+        required: true
+      deploy_role_arn:
+        type: string
+        required: true
+      approver_app_slug:
+        description: Slug of Orion's approver GitHub App; the run's actor must be <slug>[bot]
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  apply:
+    name: site apply (approved plan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: site-apply-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+    env:
+      PLAN_RUN_ID: ${{ github.event.inputs.plan_run_id }}
+      BUNDLE_SHA256: ${{ github.event.inputs.bundle_sha256 }}
+      CHANGES_DIGEST: ${{ github.event.inputs.changes_digest }}
+      ALLOW_DESTROY: ${{ github.event.inputs.allow_destroy == 'true' }}
+    outputs:
+      result: ${{ steps.result.outputs.result }}
+    steps:
+      # NOT A SECURITY BOUNDARY (see tf-apply.yml): the AWS OIDC trust is. Fail early and readably.
+      - name: Check the dispatch
+        env:
+          APP_SLUG: ${{ inputs.approver_app_slug }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          ok=true
+          [[ "$APP_SLUG" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || { echo "::error::approver_app_slug is not a GitHub App slug"; ok=false; }
+          [ "$ACTOR" = "${APP_SLUG}[bot]" ] || { echo "::error::Deploys are dispatched by ${APP_SLUG}[bot] only (actor: $ACTOR)."; ok=false; }
+          [ "$TRIGGERING_ACTOR" = "$ACTOR" ] || { echo "::error::Triggering actor differs from actor (re-run?)."; ok=false; }
+          [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || { echo "::error::Deploys run on workflow_dispatch only."; ok=false; }
+          [ "$GITHUB_REF" = "refs/heads/main" ] || { echo "::error::Deploys run from main only."; ok=false; }
+          [ "$GITHUB_RUN_ATTEMPT" = "1" ] || { echo "::error::Re-runs are not deployed: plan and approve again."; ok=false; }
+          [[ "$PLAN_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "::error::plan_run_id is not a run id"; ok=false; }
+          [[ "$BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::bundle_sha256 is not 64 lowercase hex"; ok=false; }
+          [[ "$CHANGES_DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::changes_digest is not 64 lowercase hex"; ok=false; }
+          $ok
+          {
+            echo "### Site deploy request"
+            echo
+            echo "- Plan run: \`$PLAN_RUN_ID\`"
+            echo "- Bundle sha256: \`$BUNDLE_SHA256\`"
+            echo "- Changes digest: \`$CHANGES_DIGEST\`"
+            echo "- Allow destroy: \`$ALLOW_DESTROY\`"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: deploy-workflows tools
+        id: tools
+        uses: tobipjuk/deploy-workflows/.github/actions/tools@main
+
+      - name: Check the plan run (main, newest, < 2 h, exactly site plan + attest, exact workflow set)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TOOLS: ${{ steps.tools.outputs.dir }}
+        run: |
+          set -euo pipefail
+          python3 -I "$TOOLS/scripts/check_plan_run.py" --kind site --repo "$GITHUB_REPOSITORY" \
+            --run-id "$PLAN_RUN_ID" --expected-sha "$GITHUB_SHA" --max-age-seconds 7200 \
+            --facts-out "$RUNNER_TEMP/plan-run.json"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plan-bundle
+          path: ${{ runner.temp }}/download/bundle
+          run-id: ${{ github.event.inputs.plan_run_id }}
+          github-token: ${{ github.token }}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plan-summary
+          path: ${{ runner.temp }}/download/summary
+          run-id: ${{ github.event.inputs.plan_run_id }}
+          github-token: ${{ github.token }}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plan-attestation
+          path: ${{ runner.temp }}/download/attestation
+          run-id: ${{ github.event.inputs.plan_run_id }}
+          github-token: ${{ github.token }}
+
+      # Guardian F1: the artifacts must be the ones attested by the nested tf-attest.yml job of
+      # that run (same token rules as tf-apply: job_workflow_ref tf-attest.yml@main, run, sha, ...).
+      - name: Verify the plan attestation
+        env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/download"
+          facts="$RUNNER_TEMP/plan-run.json"
+          [ "$(ls -A "$d/bundle")" = "plan-bundle.tar" ] || { echo "::error::unexpected plan-bundle content"; exit 1; }
+          [ "$(ls -A "$d/summary")" = "plan-summary.json" ] || { echo "::error::unexpected plan-summary content"; exit 1; }
+          attempt=$(python3 -Ic 'import json,sys; print(int(json.load(open(sys.argv[1]))["run_attempt"]))' "$facts")
+          started=$(python3 -Ic 'import json,sys; print(json.load(open(sys.argv[1]))["run_started_at"])' "$facts")
+          updated=$(python3 -Ic 'import json,sys; print(json.load(open(sys.argv[1]))["updated_at"])' "$facts")
+          python3 -I "$TOOLS/scripts/attest.py" verify \
+            --token "$d/attestation/token.jwt" --manifest "$d/attestation/manifest.json" \
+            --jwks-url https://token.actions.githubusercontent.com/.well-known/jwks \
+            --bundle "$d/bundle/plan-bundle.tar" --summary "$d/summary/plan-summary.json" \
+            --repo "$GITHUB_REPOSITORY" --run-id "$PLAN_RUN_ID" --run-attempt "$attempt" \
+            --sha "$GITHUB_SHA" --not-before "$started" --not-after "$updated" \
+            --expect-bundle-sha256 "$BUNDLE_SHA256" --expect-digest "$CHANGES_DIGEST"
+          echo "Plan attestation verified (site-plan.yml@main, run $PLAN_RUN_ID attempt $attempt)" >> "$GITHUB_STEP_SUMMARY"
+
+      # Before any credentials: bundle members and sums, summary = approved values + kind site +
+      # deployable + complete diffs, plan.json = the summary's, digest recomputed from plan.json,
+      # policy unchanged since the plan, every write inside the policy and the type tables.
+      - name: Verify the site plan against the approval and the policy
+        working-directory: ${{ runner.temp }}
+        env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
+          REGION_INPUT: ${{ inputs.aws_region }}
+          ACCOUNT_INPUT: ${{ inputs.aws_account_id }}
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/download"
+          python3 -I "$TOOLS/scripts/site_apply.py" --verify-only \
+            --bundle "$d/bundle/plan-bundle.tar" --summary "$d/summary/plan-summary.json" \
+            --bundle-sha256 "$BUNDLE_SHA256" --changes-digest "$CHANGES_DIGEST" --sha "$GITHUB_SHA" \
+            --repository "$GITHUB_REPOSITORY" --policy-dir "$TOOLS/policy/site" \
+            --allow-destroy "$ALLOW_DESTROY" --expect-region "$REGION_INPUT" --expect-account "$ACCOUNT_INPUT"
+
+      - name: Show the OIDC subject
+        run: |
+          set -euo pipefail
+          tok=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | python3 -Ic 'import json,sys; print(json.load(sys.stdin)["value"])')
+          printf '%s' "$tok" | python3 -Ic '
+          import base64, json, sys
+          p = sys.stdin.read().split(".")[1]
+          print("OIDC sub:", json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4)))["sub"])'
+
+      - name: Assume the deploy role (OIDC)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ inputs.deploy_role_arn }}
+          role-session-name: gh-site-deploy-${{ github.run_id }}
+          role-duration-seconds: 3600
+          aws-region: ${{ inputs.aws_region }}
+          allowed-account-ids: ${{ inputs.aws_account_id }}
+
+      # SILENT by design (round 4 M1, round 5 L4): step names, counts, keys, and the gate test
+      # cases by name with pass/FAIL. Never AWS responses, the gate's output, logs or errors.
+      - name: Apply the site plan
+        id: apply
+        working-directory: ${{ runner.temp }}
+        env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/download"
+          python3 -I "$TOOLS/scripts/site_apply.py" \
+            --bundle "$d/bundle/plan-bundle.tar" --summary "$d/summary/plan-summary.json" \
+            --bundle-sha256 "$BUNDLE_SHA256" --changes-digest "$CHANGES_DIGEST" --sha "$GITHUB_SHA" \
+            --repository "$GITHUB_REPOSITORY" --policy-dir "$TOOLS/policy/site" \
+            --allow-destroy "$ALLOW_DESTROY" --plan-run-id "$PLAN_RUN_ID" \
+            --checks-dir "$RUNNER_TEMP/checks" --github-output "$GITHUB_OUTPUT"
+
+      - name: Deploy result for Orion
+        id: result
+        if: always()
+        env:
+          APPLY_OUTCOME: ${{ steps.apply.outputs.applied == 'true' && 'success' || 'failure' }}
+          PARTIAL: ${{ steps.apply.outputs.partial }}
+          ADD: ${{ steps.apply.outputs.add }}
+          CHANGE: ${{ steps.apply.outputs.change }}
+          DESTROY: ${{ steps.apply.outputs.destroy }}
+          REPLACE: ${{ steps.apply.outputs.replace }}
+          TARGET: ${{ inputs.target }}
+          TOOLS_DIR: ${{ steps.tools.outputs.dir }}
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/download"
+          python3 -I "$TOOLS_DIR/scripts/deploy_result.py" --checks-dir "$RUNNER_TEMP/checks" \
+            --out "$RUNNER_TEMP/deploy-result.json" --github-output "$GITHUB_OUTPUT"
+
+      - name: Upload the deploy result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: deploy-result
+          path: ${{ runner.temp }}/deploy-result.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Fail unless applied
+        if: always() && steps.apply.outputs.applied != 'true'
+        run: |
+          echo "::error::The site plan was not applied."
+          exit 1

@@ -346,6 +346,14 @@ class Planner:
                 old = sd.text_or_none(live["live_text"][key])
                 if old is None:
                     old = f"(live object is not UTF-8 text: {len(live['live_text'][key])} bytes)"
+            if max(len(old or ""), len(texts[key])) > sd.MAX_TEXT_DIFF_INPUT:
+                # Too large to diff on a card: a code file can't be shown in full (not deployable),
+                # a data file is listed without its diff.
+                diffs.append({"address": f"s3:{key}", "file": key, "kind": d["class"], "added": 0, "removed": 0,
+                              "invisible": 0, "too_large": True,
+                              "text": f"--- live/{key}\n+++ commit/{key}\n(too large to diff: {d['size']} bytes, "
+                                      f"sha256 {d['sha256']})\n"})
+                continue
             text, a, r, inv = sd.text_diff(old, texts[key], f"live/{key}", f"commit/{key}")
             if adoption and d["class"] == "code":
                 inv = max(inv, sd.count_invisible(texts[key]))

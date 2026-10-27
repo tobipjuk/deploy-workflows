@@ -463,6 +463,11 @@ class Applier:
                 self._salvage_manifest(sha, plan_run_id)
                 raise ApplyFailed(str(e)) from None
             raise ApplyRefused(str(e)) from None
+        except Exception as e:  # noqa: BLE001 - never leave written keys out of the manifest
+            if self.wrote:
+                self._salvage_manifest(sha, plan_run_id)
+                raise ApplyFailed(f"internal error {e.__class__.__name__}") from None
+            raise ApplyRefused(f"internal error {e.__class__.__name__}") from None
         try:
             self.write_manifest(sha, plan_run_id)
         except site_aws.AwsError as e:
@@ -556,8 +561,11 @@ def main(argv=None, aws=None, lfs=None, sleep=time.sleep, http_get=http_get_no_r
         output("applied", "false")
         output("partial", "true")
         return 2
-    except site_aws.AwsError as e:
+    except (site_aws.AwsError, lfs_fetch.LfsError, site_bundle.BundleError, OSError, ValueError, KeyError,
+            TypeError) as e:
         wrote = bool(applier and applier.wrote)
+        if not isinstance(e, (site_aws.AwsError, lfs_fetch.LfsError, site_bundle.BundleError)):
+            e = f"internal error {e.__class__.__name__}"
         log(f"::error::Deploy {'FAILED after writes' if wrote else 'not applied, nothing written'}: {e}"[:600])
         output("applied", "false")
         if wrote:
