@@ -1,0 +1,156 @@
+{
+ "Version": "2012-10-17",
+ "Statement": [
+  {
+   "Sid": "LambdaRead",
+   "Effect": "Allow",
+   "Action": [
+    "lambda:GetFunction",
+    "lambda:GetFunctionConfiguration"
+   ],
+   "Resource": "arn:aws:lambda:eu-west-2:880207437749:function:ev3-workshop-progress-api"
+  },
+  {
+   "Sid": "GateRead",
+   "Effect": "Allow",
+   "Action": [
+    "cloudfront:GetFunction",
+    "cloudfront:DescribeFunction"
+   ],
+   "Resource": "arn:aws:cloudfront::880207437749:function/ev3-workshop-site-pin"
+  },
+  {
+   "Sid": "SiteListing",
+   "Effect": "Allow",
+   "Action": [
+    "s3:ListBucket"
+   ],
+   "Resource": "arn:aws:s3:::ev3-workshop-880207437749"
+  },
+  {
+   "Sid": "SiteTextKeysOnly",
+   "Effect": "Allow",
+   "Action": [
+    "s3:GetObject"
+   ],
+   "Resource": [
+    "arn:aws:s3:::ev3-workshop-880207437749/index.html",
+    "arn:aws:s3:::ev3-workshop-880207437749/pin.html",
+    "arn:aws:s3:::ev3-workshop-880207437749/book.html",
+    "arn:aws:s3:::ev3-workshop-880207437749/sw.js",
+    "arn:aws:s3:::ev3-workshop-880207437749/community.json",
+    "arn:aws:s3:::ev3-workshop-880207437749/img/*.css",
+    "arn:aws:s3:::ev3-workshop-880207437749/img/*.htm",
+    "arn:aws:s3:::ev3-workshop-880207437749/img/*.html",
+    "arn:aws:s3:::ev3-workshop-880207437749/img/*.js",
+    "arn:aws:s3:::ev3-workshop-880207437749/img/*.json",
+    "arn:aws:s3:::ev3-workshop-880207437749/img/*.ldr",
+    "arn:aws:s3:::ev3-workshop-880207437749/img/*.mjs",
+    "arn:aws:s3:::ev3-workshop-880207437749/img/*.mpd",
+    "arn:aws:s3:::ev3-workshop-880207437749/img/*.py",
+    "arn:aws:s3:::ev3-workshop-880207437749/img/*.svg",
+    "arn:aws:s3:::ev3-workshop-880207437749/img/*.txt",
+    "arn:aws:s3:::ev3-workshop-880207437749/img/*.webmanifest",
+    "arn:aws:s3:::ev3-workshop-880207437749/img/*.xml",
+    "arn:aws:s3:::ev3-workshop-880207437749/fonts/*.css",
+    "arn:aws:s3:::ev3-workshop-880207437749/fonts/*.htm",
+    "arn:aws:s3:::ev3-workshop-880207437749/fonts/*.html",
+    "arn:aws:s3:::ev3-workshop-880207437749/fonts/*.js",
+    "arn:aws:s3:::ev3-workshop-880207437749/fonts/*.json",
+    "arn:aws:s3:::ev3-workshop-880207437749/fonts/*.ldr",
+    "arn:aws:s3:::ev3-workshop-880207437749/fonts/*.mjs",
+    "arn:aws:s3:::ev3-workshop-880207437749/fonts/*.mpd",
+    "arn:aws:s3:::ev3-workshop-880207437749/fonts/*.py",
+    "arn:aws:s3:::ev3-workshop-880207437749/fonts/*.svg",
+    "arn:aws:s3:::ev3-workshop-880207437749/fonts/*.txt",
+    "arn:aws:s3:::ev3-workshop-880207437749/fonts/*.webmanifest",
+    "arn:aws:s3:::ev3-workshop-880207437749/fonts/*.xml",
+    "arn:aws:s3:::ev3-workshop-880207437749/pages/*.css",
+    "arn:aws:s3:::ev3-workshop-880207437749/pages/*.htm",
+    "arn:aws:s3:::ev3-workshop-880207437749/pages/*.html",
+    "arn:aws:s3:::ev3-workshop-880207437749/pages/*.js",
+    "arn:aws:s3:::ev3-workshop-880207437749/pages/*.json",
+    "arn:aws:s3:::ev3-workshop-880207437749/pages/*.ldr",
+    "arn:aws:s3:::ev3-workshop-880207437749/pages/*.mjs",
+    "arn:aws:s3:::ev3-workshop-880207437749/pages/*.mpd",
+    "arn:aws:s3:::ev3-workshop-880207437749/pages/*.py",
+    "arn:aws:s3:::ev3-workshop-880207437749/pages/*.svg",
+    "arn:aws:s3:::ev3-workshop-880207437749/pages/*.txt",
+    "arn:aws:s3:::ev3-workshop-880207437749/pages/*.webmanifest",
+    "arn:aws:s3:::ev3-workshop-880207437749/pages/*.xml",
+    "arn:aws:s3:::ev3-workshop-880207437749/instructions/*.css",
+    "arn:aws:s3:::ev3-workshop-880207437749/instructions/*.htm",
+    "arn:aws:s3:::ev3-workshop-880207437749/instructions/*.html",
+    "arn:aws:s3:::ev3-workshop-880207437749/instructions/*.js",
+    "arn:aws:s3:::ev3-workshop-880207437749/instructions/*.json",
+    "arn:aws:s3:::ev3-workshop-880207437749/instructions/*.ldr",
+    "arn:aws:s3:::ev3-workshop-880207437749/instructions/*.mjs",
+    "arn:aws:s3:::ev3-workshop-880207437749/instructions/*.mpd",
+    "arn:aws:s3:::ev3-workshop-880207437749/instructions/*.py",
+    "arn:aws:s3:::ev3-workshop-880207437749/instructions/*.svg",
+    "arn:aws:s3:::ev3-workshop-880207437749/instructions/*.txt",
+    "arn:aws:s3:::ev3-workshop-880207437749/instructions/*.webmanifest",
+    "arn:aws:s3:::ev3-workshop-880207437749/instructions/*.xml",
+    "arn:aws:s3:::ev3-workshop-880207437749/community/*.css",
+    "arn:aws:s3:::ev3-workshop-880207437749/community/*.htm",
+    "arn:aws:s3:::ev3-workshop-880207437749/community/*.html",
+    "arn:aws:s3:::ev3-workshop-880207437749/community/*.js",
+    "arn:aws:s3:::ev3-workshop-880207437749/community/*.json",
+    "arn:aws:s3:::ev3-workshop-880207437749/community/*.ldr",
+    "arn:aws:s3:::ev3-workshop-880207437749/community/*.mjs",
+    "arn:aws:s3:::ev3-workshop-880207437749/community/*.mpd",
+    "arn:aws:s3:::ev3-workshop-880207437749/community/*.py",
+    "arn:aws:s3:::ev3-workshop-880207437749/community/*.svg",
+    "arn:aws:s3:::ev3-workshop-880207437749/community/*.txt",
+    "arn:aws:s3:::ev3-workshop-880207437749/community/*.webmanifest",
+    "arn:aws:s3:::ev3-workshop-880207437749/community/*.xml"
+   ]
+  },
+  {
+   "Sid": "ManifestRead",
+   "Effect": "Allow",
+   "Action": [
+    "s3:GetObject"
+   ],
+   "Resource": "arn:aws:s3:::ev3-workshop-deploy-880207437749/deployed-manifest.json"
+  },
+  {
+   "Sid": "ManifestListOwnKey",
+   "Effect": "Allow",
+   "Action": [
+    "s3:ListBucket"
+   ],
+   "Resource": "arn:aws:s3:::ev3-workshop-deploy-880207437749",
+   "Condition": {
+    "StringEquals": {
+     "s3:prefix": [
+      "deployed-manifest.json"
+     ]
+    }
+   }
+  },
+  {
+   "Sid": "DenyEverythingElse",
+   "Effect": "Deny",
+   "NotAction": [
+    "s3:GetObject",
+    "s3:ListBucket",
+    "lambda:GetFunction",
+    "lambda:GetFunctionConfiguration",
+    "cloudfront:GetFunction",
+    "cloudfront:DescribeFunction"
+   ],
+   "Resource": "*"
+  },
+  {
+   "Sid": "DenySecrets",
+   "Effect": "Deny",
+   "Resource": "*",
+   "Action": [
+    "cloudfront-keyvaluestore:*",
+    "secretsmanager:GetSecretValue",
+    "kms:Decrypt"
+   ]
+  }
+ ]
+}

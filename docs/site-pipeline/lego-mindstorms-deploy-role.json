@@ -1,0 +1,159 @@
+{
+ "Version": "2012-10-17",
+ "Statement": [
+  {
+   "Sid": "SiteObjects",
+   "Effect": "Allow",
+   "Action": [
+    "s3:PutObject",
+    "s3:GetObject",
+    "s3:DeleteObject"
+   ],
+   "Resource": [
+    "arn:aws:s3:::ev3-workshop-880207437749/index.html",
+    "arn:aws:s3:::ev3-workshop-880207437749/pin.html",
+    "arn:aws:s3:::ev3-workshop-880207437749/book.html",
+    "arn:aws:s3:::ev3-workshop-880207437749/sw.js",
+    "arn:aws:s3:::ev3-workshop-880207437749/community.json",
+    "arn:aws:s3:::ev3-workshop-880207437749/img/*",
+    "arn:aws:s3:::ev3-workshop-880207437749/fonts/*",
+    "arn:aws:s3:::ev3-workshop-880207437749/pages/*",
+    "arn:aws:s3:::ev3-workshop-880207437749/instructions/*",
+    "arn:aws:s3:::ev3-workshop-880207437749/community/*"
+   ]
+  },
+  {
+   "Sid": "SiteListing",
+   "Effect": "Allow",
+   "Action": [
+    "s3:ListBucket"
+   ],
+   "Resource": "arn:aws:s3:::ev3-workshop-880207437749"
+  },
+  {
+   "Sid": "Manifest",
+   "Effect": "Allow",
+   "Action": [
+    "s3:GetObject",
+    "s3:PutObject"
+   ],
+   "Resource": "arn:aws:s3:::ev3-workshop-deploy-880207437749/deployed-manifest.json"
+  },
+  {
+   "Sid": "ManifestListOwnKey",
+   "Effect": "Allow",
+   "Action": [
+    "s3:ListBucket"
+   ],
+   "Resource": "arn:aws:s3:::ev3-workshop-deploy-880207437749",
+   "Condition": {
+    "StringEquals": {
+     "s3:prefix": [
+      "deployed-manifest.json"
+     ]
+    }
+   }
+  },
+  {
+   "Sid": "LambdaCodeOnly",
+   "Effect": "Allow",
+   "Action": [
+    "lambda:GetFunction",
+    "lambda:GetFunctionConfiguration",
+    "lambda:UpdateFunctionCode"
+   ],
+   "Resource": "arn:aws:lambda:eu-west-2:880207437749:function:ev3-workshop-progress-api"
+  },
+  {
+   "Sid": "GateCode",
+   "Effect": "Allow",
+   "Action": [
+    "cloudfront:DescribeFunction",
+    "cloudfront:GetFunction",
+    "cloudfront:UpdateFunction",
+    "cloudfront:TestFunction",
+    "cloudfront:PublishFunction"
+   ],
+   "Resource": "arn:aws:cloudfront::880207437749:function/ev3-workshop-site-pin"
+  },
+  {
+   "Sid": "Invalidate",
+   "Effect": "Allow",
+   "Action": [
+    "cloudfront:CreateInvalidation",
+    "cloudfront:GetInvalidation"
+   ],
+   "Resource": "arn:aws:cloudfront::880207437749:distribution/EEXAMPLE0LEGO"
+  },
+  {
+   "Sid": "DenyEverythingElse",
+   "Effect": "Deny",
+   "NotAction": [
+    "s3:PutObject",
+    "s3:GetObject",
+    "s3:DeleteObject",
+    "s3:ListBucket",
+    "lambda:GetFunction",
+    "lambda:GetFunctionConfiguration",
+    "lambda:UpdateFunctionCode",
+    "cloudfront:DescribeFunction",
+    "cloudfront:GetFunction",
+    "cloudfront:UpdateFunction",
+    "cloudfront:TestFunction",
+    "cloudfront:PublishFunction",
+    "cloudfront:CreateInvalidation",
+    "cloudfront:GetInvalidation"
+   ],
+   "Resource": "*"
+  },
+  {
+   "Sid": "DenyUnconditionalPut",
+   "Effect": "Deny",
+   "Action": [
+    "s3:PutObject"
+   ],
+   "Resource": "*",
+   "Condition": {
+    "Null": {
+     "s3:if-match": "true",
+     "s3:if-none-match": "true"
+    }
+   }
+  },
+  {
+   "Sid": "DenyDangerous",
+   "Effect": "Deny",
+   "Resource": "*",
+   "Action": [
+    "iam:*",
+    "sts:AssumeRole",
+    "sts:AssumeRoleWithWebIdentity",
+    "sts:AssumeRoleWithSAML",
+    "lambda:UpdateFunctionConfiguration",
+    "lambda:AddPermission",
+    "lambda:RemovePermission",
+    "lambda:*FunctionUrl*",
+    "lambda:CreateFunction",
+    "lambda:DeleteFunction",
+    "lambda:PublishLayerVersion",
+    "cloudfront:UpdateDistribution",
+    "cloudfront:CreateFunction",
+    "cloudfront:DeleteFunction",
+    "cloudfront:CreateKeyValueStore",
+    "cloudfront:UpdateKeyValueStore",
+    "cloudfront:DeleteKeyValueStore",
+    "cloudfront:DescribeKeyValueStore",
+    "cloudfront-keyvaluestore:*",
+    "apigateway:*",
+    "dynamodb:*",
+    "secretsmanager:*",
+    "kms:*",
+    "ssm:*",
+    "s3:PutBucket*",
+    "s3:DeleteBucket*",
+    "s3:PutObjectAcl",
+    "s3:DeleteObjectVersion"
+   ]
+  }
+ ]
+}
