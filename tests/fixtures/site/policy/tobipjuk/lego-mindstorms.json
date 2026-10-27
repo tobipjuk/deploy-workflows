@@ -1,0 +1,42 @@
+{
+ "schema": 1,
+ "kind": "site",
+ "repository": "tobipjuk/lego-mindstorms",
+ "target": "lego-mindstorms",
+ "account_id": "880207437749",
+ "region": "eu-west-2",
+ "bucket": "ev3-workshop-880207437749",
+ "root_keys": ["index.html", "pin.html", "book.html", "sw.js", "community.json"],
+ "prefixes": ["img/", "fonts/", "pages/", "instructions/", "community/"],
+ "browser_code_sources": ["site/"],
+ "manifest": {"bucket": "ev3-workshop-deploy-880207437749", "key": "deployed-manifest.json"},
+ "lambda": {
+  "function_name": "ev3-workshop-progress-api",
+  "source_dir": "site/api",
+  "members": ["progress.py", "session.py"],
+  "ignore": ["test_*.py"]
+ },
+ "gate": {
+  "function_name": "ev3-workshop-site-pin",
+  "source": "site/api/viewer_gate.js",
+  "tests": [
+   {"name": "no cookie, page: 302 to the PIN page", "uri": "/", "headers": {"accept": "text/html"},
+    "expect": {"status": 302, "location_prefix": "/pin.html"}},
+   {"name": "the PIN page passes", "uri": "/pin.html", "expect": {"pass": true, "uri": "/pin.html"}},
+   {"name": "forged cookie: 302 to the PIN page", "uri": "/index.html", "headers": {"accept": "text/html"},
+    "cookies": {"ev3s": "1.9999999999.forged.0000000000000000000000000000000000000000000000000000000000000000"},
+    "expect": {"status": 302, "location_prefix": "/pin.html"}}
+  ]
+ },
+ "distribution_id": "EEXAMPLE0LEGO",
+ "smoke": {
+  "base_url": "https://dexample0lego.cloudfront.net",
+  "checks": [
+   {"path": "/", "status": 302},
+   {"path": "/api/progress", "status": 401},
+   {"path": "/pin.html", "status": 200, "body_sha256_of_key": "pin.html"}
+  ]
+ },
+ "max_objects": 20000,
+ "max_deletes": 20
+}
