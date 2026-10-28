@@ -425,7 +425,8 @@ Digest 3b67c029...2d384e  Bundle 9f3e01aa...
   keys, LIVE DRIFT, settings mismatch, Lambda env var names unreadable, non-ASCII letters in
   code, BASELINE ADOPTION). Show every entry: label, action, address, and the non-null of
   `path`/`before`/`after`. If Telegram's 4,096 characters force a cut, never drop an "Invisible
-  or bidi characters" entry; cut from the end of the list instead.
+  or bidi characters", "Data files without a diff" or "Lambda env var names unreadable" entry;
+  cut from the end of the list instead.
 - Then the per-prefix counts from `site.prefixes`, then the first 15 entries of `changes`
   (deletes first).
 - **The attachment** (`sendDocument`, plain text, no parse mode; file name and caption built by

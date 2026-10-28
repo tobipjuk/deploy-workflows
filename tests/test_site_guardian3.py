@@ -227,6 +227,26 @@ class DataWithoutDiffTest(unittest.TestCase):
         self.assertEqual(len(att), 1)
         self.assertEqual(att[0]["after"], "1 data file changed without a diff on the card (full content in the commit)")
 
+    def test_too_large_data_file_invisible_still_flagged(self):
+        """Guardian on e90b777, 3."""
+        env = F.Env(self)
+        adopt(env)
+        env.commit({"building-instructions/community/clock/model.ldr": b"0 x\n" * 300000 + "0 \u202e\n".encode()})
+        rc, log = run_plan(env, event="push")
+        self.assertEqual(rc, 0, log)
+        att = [a for a in summary(env)["attention"] if a["label"] == "Invisible or bidi characters"]
+        self.assertEqual([a["after"] for a in att], ["1 in the file (too large to diff)"])
+
+    def test_cap_keeps_new_summary_entries(self):
+        items = [sd._att(f"s3:k{i}", "LIVE DRIFT", "info") for i in range(100)]
+        items += [sd.data_diffs_attention(3), sd._att("lambda:f", "Lambda env var names unreadable", "info")]
+        kept, trunc = sd.cap_attention(sd.order_attention(items))
+        self.assertTrue(trunc)
+        self.assertEqual(len(kept), sd.MAX_ATTENTION)
+        got = {a["label"] for a in kept}
+        self.assertIn("Data files without a diff", got)
+        self.assertIn("Lambda env var names unreadable", got)
+
     def test_small_data_change_no_entry(self):
         env = F.Env(self)
         adopt(env)

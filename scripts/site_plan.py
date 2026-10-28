@@ -374,8 +374,10 @@ class Planner:
             if max(len(old or ""), len(texts[key])) > sd.MAX_TEXT_DIFF_INPUT:
                 # Too large to diff on a card: a code file can't be shown in full (not deployable),
                 # a data file is listed without its diff.
+                # No diff, but its invisible/bidi characters still count (whole file; Guardian on
+                # e90b777, 3).
                 diffs.append({"address": f"s3:{key}", "file": key, "kind": d["class"], "added": 0, "removed": 0,
-                              "invisible": 0, "too_large": True,
+                              "invisible": sd.count_invisible(texts[key]), "too_large": True,
                               "text": f"--- live/{key}\n+++ commit/{key}\n(too large to diff: {d['size']} bytes, "
                                       f"sha256 {d['sha256']})\n"})
                 continue
@@ -479,7 +481,9 @@ class Planner:
                                              dfx["file"], None, f"{n} in added lines (possible homoglyphs)"))
             if dfx["invisible"] and dfx["kind"] in ("code", "data"):
                 attention.append(sd._att(dfx["address"], "Invisible or bidi characters", "update", dfx["file"],
-                                         None, f"{dfx['invisible']} in added lines (shown as <U+XXXX>)"))
+                                         None, f"{dfx['invisible']} in the file (too large to diff)"
+                                         if dfx.get("too_large") else
+                                         f"{dfx['invisible']} in added lines (shown as <U+XXXX>)"))
         if adoption:
             attention.append(sd._att(f"manifest:{pol['manifest']['key']}", "BASELINE ADOPTION", "create", None, None,
                                      f"first pipeline deploy: {len(s3['adopted'])} live objects adopted, "

@@ -123,12 +123,17 @@ def count_nonascii_letters_added(diff_text):
     return n
 
 
+# Never dropped by the cap: what can't be read anywhere else on the card (Guardian L4; the two
+# summary entries added on fff80e5, Guardian on e90b777, 3).
+NEVER_DROPPED = ("Invisible or bidi characters", "Data files without a diff", "Lambda env var names unreadable")
+
+
 def cap_attention(items):
-    """At most MAX_ATTENTION entries; invisible/bidi entries are never dropped (Guardian L4)."""
+    """At most MAX_ATTENTION entries; NEVER_DROPPED entries are never dropped (Guardian L4)."""
     if len(items) <= MAX_ATTENTION:
         return items, False
-    keep_always = [a for a in items if a["label"] == "Invisible or bidi characters"]
-    rest = [a for a in items if a["label"] != "Invisible or bidi characters"]
+    keep_always = [a for a in items if a["label"] in NEVER_DROPPED]
+    rest = [a for a in items if a["label"] not in NEVER_DROPPED]
     room = max(MAX_ATTENTION - 1 - len(keep_always), 0)
     dropped = len(rest) - room
     kept = order_attention(keep_always + rest[:room])

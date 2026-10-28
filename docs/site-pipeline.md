@@ -143,7 +143,9 @@ differs from LIVE, Lambda code, PIN page, Service worker, Cache-Control or Conte
 renamed Lambda member, Non-text member in the live Lambda zip, Data files without a diff, Delete
 of a root or code key, LIVE DRIFT, Settings mismatch, Lambda env var names unreadable, Non-ASCII
 letters or combining marks in code, BASELINE ADOPTION. Up to 60 entries (drift over 20 keys is
-one entry); invisible/bidi entries are never dropped by the cap (Guardian L4).
+one entry); "Invisible or bidi characters", "Data files without a diff" and "Lambda env var
+names unreadable" entries are never dropped by the cap (Guardian L4; e90b777, 3). A data file
+too large to diff still has its invisible/bidi characters counted over the whole file.
 
 ## Bundle and manifest
 
