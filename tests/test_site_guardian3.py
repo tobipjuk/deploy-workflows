@@ -1,6 +1,6 @@
 """Guardian review of origin/main..fff80e5: M1 (Lambda env var names unreadable under the plan
 role's kms:Decrypt deny), L1 (diff lines starting with ++/--), L2 (live keys the apply would
-refuse)."""
+refuse), L3 (a rejected UpdateFunctionCode is not a partial deploy)."""
 import json
 import os
 import stat
@@ -156,6 +156,37 @@ class UnsafeLiveKeyTest(unittest.TestCase):
         self.assertEqual(s3["unsafe_keys"], ["img/a\nb.png"])
         for x in s3["drift"]:
             self.assertNotIn("\n", x["key"])
+
+
+class LambdaRejectedTest(unittest.TestCase):
+    """L3: UpdateFunctionCode rejected on its RevisionId writes nothing: refused, not partial."""
+
+    def setUp(self):
+        self.env = F.Env(self)
+        adopt(self.env)
+        self.env.commit({"site/api/progress.py": F.PROGRESS_PY + b"# v2\n",
+                         "site/index.html": b"<!doctype html>\n<p>v2</p>\n"})
+        rc, log = run_plan(self.env, event="push")
+        self.assertEqual(rc, 0, log)
+        self.assertTrue(summary(self.env)["deployable"])
+        self.env.plan_out = outputs(self.env)
+        self.before = dict(self.env.aws.buckets[BUCKET])
+
+    def test_precondition_failed_is_refused(self):
+        self.env.aws.faults["lambda:UpdateFunctionCode"] = [
+            site_aws.AwsError("lambda:UpdateFunctionCode", "PreconditionFailedException")]
+        rc, log = run_apply(self.env)
+        self.assertEqual(rc, 1, log)
+        self.assertIn("nothing written", log)
+        self.assertNotIn("partial=true", self.env.last_apply_output)
+        self.assertEqual(self.env.aws.buckets[BUCKET], self.before)
+
+    def test_unknown_error_is_still_partial(self):
+        self.env.aws.faults["lambda:UpdateFunctionCode"] = [
+            site_aws.AwsError("lambda:UpdateFunctionCode", "TimeoutExpired")]
+        rc, log = run_apply(self.env)
+        self.assertEqual(rc, 2, log)
+        self.assertIn("partial=true", self.env.last_apply_output)
 
 
 if __name__ == "__main__":

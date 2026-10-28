@@ -168,7 +168,10 @@ Order and rules: `site_apply.py` docstring (design section 4). The apply re-deri
 list from `plan.json` and compares the digest with the approved one, checks the policy file is
 the one the plan saw, and re-validates every write against the policy and tables before
 assuming the deploy role (`--verify-only`). Exit 0 applied, 1 refused before any write, 2
-failed after a write (`partial=true`, `deploy-result.json` says "partially applied").
+failed after a write (`partial=true`, `deploy-result.json` says "partially applied"). A Lambda
+`UpdateFunctionCode` rejected with `PreconditionFailedException` (RevisionId moved) or
+`ResourceConflictException` wrote nothing, so as the first write it is exit 1 (Guardian on
+fff80e5, L3); any other error there counts as a possible write.
 
 **Silent output** (round 4 M1, round 5 L4): the apply prints step names, counts and the gate
 test cases by name with pass/FAIL. `site_aws.CliAws` captures all CLI output, asks only for

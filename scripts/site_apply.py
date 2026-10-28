@@ -54,6 +54,8 @@ import site_policy as sp  # noqa: E402
 
 GATE_VIEWER_IP = "198.51.100.7"
 INVALIDATION_LIMIT = 100
+# Lambda error codes that mean UpdateFunctionCode was rejected before writing anything.
+LAMBDA_NOT_WRITTEN = ("PreconditionFailedException", "ResourceConflictException")
 
 
 class ApplyRefused(Exception):
@@ -319,8 +321,15 @@ class Applier:
         zp = os.path.join(self.workdir, "lambda.zip")
         with open(zp, "wb") as f:
             f.write(self.bundle["lambda_zip"])
+        try:
+            res = self.aws.lambda_update_code(name, zp, self.plan["prestate"]["lambda"]["revision_id"])
+        except site_aws.AwsError as e:
+            # A rejected precondition (RevisionId moved) or a conflicting update in progress wrote
+            # nothing; anything else (a timeout, an unknown error) may have (Guardian on fff80e5, L3).
+            if e.code not in LAMBDA_NOT_WRITTEN:
+                self.wrote = True
+            raise
         self.wrote = True
-        res = self.aws.lambda_update_code(name, zp, self.plan["prestate"]["lambda"]["revision_id"])
         deadline = self.now() + 300
         while True:
             cfg = self.aws.lambda_get_configuration(name)
