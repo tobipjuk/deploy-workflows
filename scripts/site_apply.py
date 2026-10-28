@@ -327,6 +327,15 @@ class Applier:
             raise ApplyRefused(f"gate test(s) failed: {', '.join(failed)}. LIVE is untouched")
         return etag
 
+    def _lambda_unchanged(self, name):
+        """True only if a fresh read shows the pre-state's RevisionId and CodeSha256."""
+        pre = self.plan["prestate"]["lambda"]
+        try:
+            gf = self.aws.lambda_get_function(name)
+        except Exception:  # noqa: BLE001 - can't tell: assume a write
+            return False
+        return gf.get("revision_id") == pre["revision_id"] and gf.get("code_sha256") == pre["code_sha256"]
+
     # 4
     def lambda_update(self):
         lam = self.plan.get("lambda")
@@ -341,7 +350,10 @@ class Applier:
         except site_aws.AwsError as e:
             # A rejected precondition (RevisionId moved) or a conflicting update in progress wrote
             # nothing; anything else (a timeout, an unknown error) may have (Guardian on fff80e5, L3).
-            if e.code not in LAMBDA_NOT_WRITTEN:
+            # The CLI retries, so a first attempt can succeed with its response lost and the retry
+            # fail on the RevisionId: "nothing written" only if the Lambda still is the pre-state
+            # (Guardian on e90b777, 2).
+            if e.code not in LAMBDA_NOT_WRITTEN or not self._lambda_unchanged(name):
                 self.wrote = True
             raise
         self.wrote = True

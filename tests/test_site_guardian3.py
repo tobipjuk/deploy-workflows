@@ -182,6 +182,28 @@ class LambdaRejectedTest(unittest.TestCase):
         self.assertNotIn("partial=true", self.env.last_apply_output)
         self.assertEqual(self.env.aws.buckets[BUCKET], self.before)
 
+    def test_lost_response_then_precondition_failed_is_partial(self):
+        """Guardian on e90b777, 2: the CLI's first attempt applied the code, its response was lost,
+        and the retry failed on the RevisionId."""
+        aws = self.env.aws
+        real = aws.lambda_update_code
+
+        def applied_then_rejected(name, zip_path, revision_id):
+            real(name, zip_path, revision_id)
+            raise site_aws.AwsError("lambda:UpdateFunctionCode", "PreconditionFailedException")
+        aws.lambda_update_code = applied_then_rejected
+        rc, log = run_apply(self.env)
+        self.assertEqual(rc, 2, log)
+        self.assertIn("partial=true", self.env.last_apply_output)
+
+    def test_rejected_and_reread_fails_is_partial(self):
+        self.env.aws.faults["lambda:UpdateFunctionCode"] = [
+            site_aws.AwsError("lambda:UpdateFunctionCode", "ResourceConflictException")]
+        # the first GetFunction is the apply's pre-state check; the re-read after the rejection fails
+        self.env.aws.faults["lambda:GetFunction"] = [None, site_aws.AwsError("lambda:GetFunction", "Throttling")]
+        rc, log = run_apply(self.env)
+        self.assertEqual(rc, 2, log)
+
     def test_unknown_error_is_still_partial(self):
         self.env.aws.faults["lambda:UpdateFunctionCode"] = [
             site_aws.AwsError("lambda:UpdateFunctionCode", "TimeoutExpired")]
