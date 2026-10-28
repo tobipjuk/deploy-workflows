@@ -1,7 +1,7 @@
 """Guardian review of origin/main..fff80e5: M1 (Lambda env var names unreadable under the plan
 role's kms:Decrypt deny), L1 (diff lines starting with ++/--), L2 (live keys the apply would
 refuse), L3 (a rejected UpdateFunctionCode is not a partial deploy), L4 (data files without a
-diff need attention)."""
+diff need attention), and the optional invalidation path forms."""
 import json
 import os
 import stat
@@ -226,6 +226,27 @@ class DataWithoutDiffTest(unittest.TestCase):
         self.assertEqual(doc["site"]["diffs"], [])
         self.assertEqual([a["after"] for a in doc["attention"]],
                          ["4 data files changed without a diff on the card (full content in the commit)"])
+
+
+class InvalidationPathTest(unittest.TestCase):
+    """Optional follow-up: keys with + & = , @ are invalidated in the raw and the encoded form."""
+
+    def test_both_forms(self):
+        import site_apply
+        self.assertEqual(site_apply.invalidation_paths(["img/a+b c.png", "index.html", "x/k=v&y,z@w.txt"]),
+                         ["/img/a%2Bb%20c.png", "/img/a+b%20c.png", "/index.html",
+                          "/x/k%3Dv%26y%2Cz%40w.txt", "/x/k=v&y,z@w.txt"])
+
+    def test_applied_key_with_plus(self):
+        env = F.Env(self)
+        adopt(env)
+        env.commit({"site/img/a+b.png": F.PNG + b"+"})
+        rc, log = run_plan(env, event="push")
+        self.assertEqual(rc, 0, log)
+        env.plan_out = outputs(env)
+        rc, log = run_apply(env)
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(list(env.aws.invalidations.values())[-1], ["/img/a%2Bb.png", "/img/a+b.png"])
 
 
 if __name__ == "__main__":

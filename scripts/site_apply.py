@@ -208,6 +208,21 @@ def gate_case_passes(result, expect):
         return False
 
 
+def invalidation_paths(keys):
+    """CloudFront paths for the written keys. Browsers send + & = , @ unencoded in a path, other
+    clients may percent-encode them, and an invalidation only matches the form it names: a key
+    with one of them is invalidated in both forms (more paths, never fewer; Guardian on fff80e5,
+    optional). Space and everything outside KEY_RE's set is always percent-encoded."""
+    paths = []
+    for k in keys:
+        strict = "/" + urllib.parse.quote(k, safe="/-_.~()'!")
+        paths.append(strict)
+        loose = "/" + urllib.parse.quote(k, safe="/-_.~()'!+&=,@")
+        if loose != strict:
+            paths.append(loose)
+    return paths
+
+
 class Applier:
     def __init__(self, policy, plan, bundle, aws, lfs, workdir, log, sleep=time.sleep, http_get=None,
                  now=time.time):
@@ -440,7 +455,7 @@ class Applier:
         keys = sorted(set(self.done_puts) | self.done_deletes)
         if not keys:
             return
-        paths = ["/" + urllib.parse.quote(k, safe="/-_.~()'!") for k in keys]
+        paths = invalidation_paths(keys)
         if "index.html" in keys:
             paths.append("/")
         if len(paths) > INVALIDATION_LIMIT:
