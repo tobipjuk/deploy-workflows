@@ -159,6 +159,39 @@ class UnsafeLiveKeyTest(unittest.TestCase):
             self.assertNotIn("\n", x["key"])
 
 
+class DriftKeyDisplayTest(unittest.TestCase):
+    """Guardian on e90b777, 4: drift keys escape bidi and U+2028 too, and an S3 key that looks
+    like another address is still shown as s3:<key>."""
+
+    def test_bidi_and_line_separator_escaped(self):
+        s3 = sd.compute_s3({"root_keys": [], "prefixes": ["img/"]}, {}, {
+            "img/a\u202eb.png": {"etag": "e", "size": 1}, "x\u2028y": {"etag": "e", "size": 1}},
+            None, {}, lambda k: False, True)
+        self.assertEqual(sorted(x["key"] for x in s3["drift"]), ["img/a<U+202E>b.png", "x<U+2028>y"])
+
+    def test_lookalike_address_gets_s3_prefix(self):
+        env = F.Env(self)
+        adopt(env)
+        env.aws.put_live(BUCKET, f"lambda:{FN}", b"x")
+        env.aws.put_live(BUCKET, "cloudfront-function:ev3-workshop-site-pin", b"x")
+        rc, log = run_plan(env, event="push")
+        self.assertEqual(rc, 0, log)
+        addrs = {a["address"] for a in summary(env)["attention"] if a["label"] == "LIVE DRIFT"}
+        self.assertIn(f"s3:lambda:{FN}", addrs)
+        self.assertIn("s3:cloudfront-function:ev3-workshop-site-pin", addrs)
+        self.assertNotIn(f"lambda:{FN}", addrs)
+
+    def test_real_lambda_drift_keeps_its_address(self):
+        env = F.Env(self)
+        adopt(env)
+        lam = env.aws.lambdas[FN]
+        lam["zip"] = F.make_zip({"progress.py": F.PROGRESS_PY + b"# mac\n", "session.py": F.SESSION_PY})
+        rc, log = run_plan(env, event="push")
+        self.assertEqual(rc, 0, log)
+        addrs = {a["address"] for a in summary(env)["attention"] if a["label"] == "LIVE DRIFT"}
+        self.assertIn(f"lambda:{FN}", addrs)
+
+
 class LambdaRejectedTest(unittest.TestCase):
     """L3: UpdateFunctionCode rejected on its RevisionId writes nothing: refused, not partial."""
 

@@ -101,6 +101,12 @@ def text_diff(old, new, old_label, new_label):
     return "\n".join(lines) + ("\n" if lines else ""), added, removed, invis
 
 
+def safe_key(key):
+    """A live key as shown on the card: invisible/bidi characters (also U+2028) as <U+XXXX>,
+    then any control character escaped (Guardian on e90b777, 4)."""
+    return one_line(escape_line(key)[0])
+
+
 def one_line(s):
     """Escape control characters so a message can't start a new line (and with it a GitHub
     workflow command such as ::add-mask:: or ::stop-commands::) in the log or the summary."""
@@ -312,13 +318,13 @@ def compute_s3(policy, desired, live, manifest, live_text, binary_match, adoptio
             continue
         if not sp.in_site(policy, key):
             outside.append(key)
-            drift.append({"key": one_line(key), "what": "live object outside SITE (the deploy role can't delete it)"})
+            drift.append({"key": safe_key(key), "what": "live object outside SITE (the deploy role can't delete it)"})
             continue
         if not key_ok(key):
             # The apply's check_key would refuse this delete after the approval: like an
             # outside-SITE object, it is cleaned up on the Mac (Guardian on fff80e5, L2).
             unsafe.append(key)
-            drift.append({"key": one_line(key), "what": "live object in SITE with a key the pipeline refuses "
+            drift.append({"key": safe_key(key), "what": "live object in SITE with a key the pipeline refuses "
                                                         "(it can't delete it)"})
             continue
         if manifest is not None and key not in manifest:

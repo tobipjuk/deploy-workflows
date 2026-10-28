@@ -466,9 +466,13 @@ class Planner:
             reasons.append(f"{len(s3['unsafe_keys'])} live object(s) in SITE with keys the pipeline refuses: "
                            "clean up on the Mac")
         if drift:
+            # Entries from compute_s3 are S3 keys, always shown as s3:<key>, decided by where the
+            # entry came from, never by its text (a live key "lambda:x" can't pose as the Lambda;
+            # Guardian on e90b777, 4). The Lambda and gate entries carry their own address.
+            from_s3 = {id(x) for x in s3["drift"]}
             if len(drift) <= 20:
                 for x in drift:
-                    attention.append(sd._att(x["key"] if ":" in x["key"] else f"s3:{x['key']}", "LIVE DRIFT",
+                    attention.append(sd._att(f"s3:{x['key']}" if id(x) in from_s3 else x["key"], "LIVE DRIFT",
                                              "info", None, None, x["what"]))
             else:
                 attention.append(sd._att("s3:*", "LIVE DRIFT", "info", None, None,
