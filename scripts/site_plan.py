@@ -495,7 +495,10 @@ class Planner:
         kept, code_complete, data_truncated = sd.fit_diffs(diffs)
         if not code_complete:
             reasons.append("a code diff is too large to show in full on the card: not deployable")
-        attention, att_trunc = sd.cap_attention(sd.order_attention(attention))
+        data_hidden = sd.data_diffs_hidden(diffs, kept)
+        attention_all = sd.order_attention(attention)
+        attention, att_trunc = sd.cap_attention(sd.order_attention(
+            attention + ([sd.data_diffs_attention(data_hidden)] if data_hidden else [])))
 
         prestate = {
             "listing": {k: v["etag"] for k, v in sorted(live["listing"].items())},
@@ -540,6 +543,7 @@ class Planner:
             "plan": plan, "blobs": blobs, "zip": zip_bytes, "gate": gate_new if gate_changed else None,
             "changes": changes, "counts": counts, "destructive": destructive, "attention": attention,
             "attention_truncated": att_trunc, "diffs": kept, "code_complete": code_complete,
+            "data_hidden": data_hidden, "attention_all": attention_all,
             "data_truncated": data_truncated, "reasons": reasons, "drift": drift, "prefixes": prefixes,
             "adoption": adoption, "settings": {"mismatch": bad, "unverified": unverified},
             "has_changes": bool(changes),
@@ -571,9 +575,14 @@ def summary_doc(res, meta, deploy_enabled):
     raw = json.dumps(doc, indent=1, sort_keys=True, ensure_ascii=False).encode("utf-8")
     if len(raw) > sd.MAX_SUMMARY_BYTES:
         # Keep code diffs; drop data diffs, then the drift list, before giving up.
+        dropped = sum(1 for d in doc["site"]["diffs"] if d["kind"] != "code" and not d.get("too_large"))
         doc["site"]["diffs"] = [d for d in doc["site"]["diffs"] if d["kind"] == "code"]
         doc["site"]["data_diffs_truncated"] = True
         doc["diff_truncated"] = True
+        if dropped:
+            att, trunc = sd.cap_attention(sd.order_attention(
+                res["attention_all"] + [sd.data_diffs_attention(res["data_hidden"] + dropped)]))
+            doc["attention"], doc["attention_truncated"] = att, trunc
         raw = json.dumps(doc, indent=1, sort_keys=True, ensure_ascii=False).encode("utf-8")
         if len(raw) > sd.MAX_SUMMARY_BYTES:
             doc["site"]["drift"] = doc["site"]["drift"][:200]

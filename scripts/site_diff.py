@@ -419,6 +419,7 @@ ATTENTION_ORDER = [
     "Gate code", "Gate DEVELOPMENT differs from LIVE", "Lambda code", "PIN page", "Service worker",
     "Cache-Control or Content-Type",
     "New or renamed Lambda member", "Non-text member in the live Lambda zip",
+    "Data files without a diff",
     "Delete of a root or code key", "LIVE DRIFT", "Settings mismatch",
     "Lambda env var names unreadable",
     "Non-ASCII letters or combining marks in code", "BASELINE ADOPTION",
@@ -467,6 +468,20 @@ def fit_diffs(diffs):
         kept.append(d)
         used += n
     return kept, code_complete, data_truncated
+
+
+def data_diffs_hidden(diffs, kept):
+    """Number of data files whose diff is not on the card: too large to diff, or dropped by
+    fit_diffs for the summary budget."""
+    shown = {id(d) for d in kept if not d.get("too_large")}
+    return sum(1 for d in diffs if d["kind"] == "data" and id(d) not in shown)
+
+
+def data_diffs_attention(n):
+    """NEEDS ATTENTION entry for data files changed without a diff on the card (Guardian on
+    fff80e5, L4): their invisible or bidi characters can't be flagged. Still deployable."""
+    return _att("s3:*", "Data files without a diff", "update", None, None,
+                f"{n} data file{'s' if n != 1 else ''} changed without a diff on the card (full content in the commit)")
 
 
 def changes_from_plan(plan):

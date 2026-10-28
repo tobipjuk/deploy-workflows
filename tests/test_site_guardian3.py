@@ -1,6 +1,7 @@
 """Guardian review of origin/main..fff80e5: M1 (Lambda env var names unreadable under the plan
 role's kms:Decrypt deny), L1 (diff lines starting with ++/--), L2 (live keys the apply would
-refuse), L3 (a rejected UpdateFunctionCode is not a partial deploy)."""
+refuse), L3 (a rejected UpdateFunctionCode is not a partial deploy), L4 (data files without a
+diff need attention)."""
 import json
 import os
 import stat
@@ -187,6 +188,44 @@ class LambdaRejectedTest(unittest.TestCase):
         rc, log = run_apply(self.env)
         self.assertEqual(rc, 2, log)
         self.assertIn("partial=true", self.env.last_apply_output)
+
+
+class DataWithoutDiffTest(unittest.TestCase):
+    """L4: data files changed without a diff on the card get a NEEDS ATTENTION entry."""
+
+    def test_too_large_data_file(self):
+        env = F.Env(self)
+        adopt(env)
+        env.commit({"building-instructions/community/clock/model.ldr": b"0 x\n" * 300000})
+        rc, log = run_plan(env, event="push")
+        self.assertEqual(rc, 0, log)
+        doc = summary(env)
+        self.assertTrue(doc["deployable"])
+        att = [a for a in doc["attention"] if a["label"] == "Data files without a diff"]
+        self.assertEqual(len(att), 1)
+        self.assertEqual(att[0]["after"], "1 data file changed without a diff on the card (full content in the commit)")
+
+    def test_small_data_change_no_entry(self):
+        env = F.Env(self)
+        adopt(env)
+        env.commit({"building-instructions/community/clock/model.ldr": b"0 y\n"})
+        rc, log = run_plan(env, event="push")
+        self.assertNotIn("Data files without a diff", labels(summary(env)))
+
+    def test_summary_budget_drop_counts(self):
+        big = "x" * 500_000
+        diffs = [{"address": f"s3:d{i}.txt", "file": f"d{i}.txt", "kind": "data", "text": big, "added": 1,
+                  "removed": 0, "invisible": 0} for i in range(4)]
+        res = {"reasons": [], "counts": {"add": 0, "change": 4, "destroy": 0}, "has_changes": True,
+               "destructive": False, "changes": [], "code_complete": True, "data_truncated": False,
+               "attention": [], "attention_all": [], "attention_truncated": False, "adoption": False,
+               "prefixes": {}, "drift": [], "diffs": diffs, "data_hidden": 0,
+               "settings": {"mismatch": [], "unverified": []}, "plan": {}}
+        doc = site_plan.summary_doc(res, {}, True)
+        self.assertTrue(doc["deployable"])
+        self.assertEqual(doc["site"]["diffs"], [])
+        self.assertEqual([a["after"] for a in doc["attention"]],
+                         ["4 data files changed without a diff on the card (full content in the commit)"])
 
 
 if __name__ == "__main__":

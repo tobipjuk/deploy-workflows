@@ -132,7 +132,7 @@ form), `counts`, `has_changes`, `destructive`, `deployable`, `blocked` (always `
 | `site.not_deployable` | reasons (empty when deployable) |
 | `site.prefixes` | `{prefix: {create, update, delete}}` ("(root)" for root keys) |
 | `site.diffs` | `{address, file, kind: code\|data, text, added, removed, invisible}`: gate, Lambda, `pin.html`, `sw.js`, other code, then data. Unified diffs, invisible and bidi characters shown as `<U+XXXX>` |
-| `site.data_diffs_truncated` | data (`.txt .ldr .mpd .py`) diffs dropped for size; code never is |
+| `site.data_diffs_truncated` | data (`.txt .ldr .mpd .py`) diffs dropped for size; code never is. NEEDS ATTENTION "Data files without a diff" counts them ("N data files changed without a diff on the card"; still deployable, Guardian on fff80e5, L4) |
 | `site.drift` | `{key, what}` |
 | `site.settings_mismatch` | `{field, expected, live}` |
 | `site.settings_unverified` | settings that couldn't be read and weren't compared: `["env_names"]` under the plan role's KMS deny, else `[]` |
@@ -140,10 +140,10 @@ form), `counts`, `has_changes`, `destructive`, `deployable`, `blocked` (always `
 
 NEEDS ATTENTION order (labels): Invisible or bidi characters, Gate code, Gate DEVELOPMENT
 differs from LIVE, Lambda code, PIN page, Service worker, Cache-Control or Content-Type, New or
-renamed Lambda member, Non-text member in the live Lambda zip, Delete of a root or code key,
-LIVE DRIFT, Settings mismatch, Lambda env var names unreadable, Non-ASCII letters or combining marks in code, BASELINE ADOPTION.
-Up to 60 entries (drift over 20 keys is one entry); invisible/bidi entries are never dropped by
-the cap (Guardian L4).
+renamed Lambda member, Non-text member in the live Lambda zip, Data files without a diff, Delete
+of a root or code key, LIVE DRIFT, Settings mismatch, Lambda env var names unreadable, Non-ASCII
+letters or combining marks in code, BASELINE ADOPTION. Up to 60 entries (drift over 20 keys is
+one entry); invisible/bidi entries are never dropped by the cap (Guardian L4).
 
 ## Bundle and manifest
 
