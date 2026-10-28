@@ -1,5 +1,6 @@
 """Guardian review of origin/main..fff80e5: M1 (Lambda env var names unreadable under the plan
-role's kms:Decrypt deny), L1 (diff lines starting with ++/--)."""
+role's kms:Decrypt deny), L1 (diff lines starting with ++/--), L2 (live keys the apply would
+refuse)."""
 import json
 import os
 import stat
@@ -126,6 +127,35 @@ class PlusPlusLineTest(unittest.TestCase):
         rc, log = run_plan(env, event="push")
         self.assertEqual(rc, 0, log)
         self.assertIn("Invisible or bidi characters", labels(summary(env)))
+
+
+class UnsafeLiveKeyTest(unittest.TestCase):
+    """L2: a live key in SITE that fails check_key is never planned for delete (the apply
+    would refuse it after the approval): not deployable, clean up on the Mac."""
+
+    def test_unsafe_key_not_deleted_not_deployable(self):
+        env = F.Env(self)
+        adopt(env)
+        env.aws.put_live(BUCKET, "img/bad%20name.png", F.PNG)
+        env.commit({"site/index.html": b"<!doctype html>\n<p>v2</p>\n"})
+        rc, log = run_plan(env, event="push")
+        self.assertEqual(rc, 0, log)
+        doc = summary(env)
+        self.assertFalse(doc["deployable"])
+        self.assertTrue(any("keys the pipeline refuses" in r for r in doc["site"]["not_deployable"]))
+        self.assertNotIn({"actions": ["delete"], "address": "s3:img/bad%20name.png"}, doc["changes"])
+        self.assertIn({"key": "img/bad%20name.png", "what": "live object in SITE with a key the pipeline refuses "
+                                                         "(it can't delete it)"}, doc["site"]["drift"])
+        self.assertFalse((env.out / "plan-bundle.tar").exists())
+
+    def test_control_chars_in_live_keys_escaped(self):
+        s3 = sd.compute_s3({"root_keys": [], "prefixes": ["img/"]}, {}, {
+            "img/a\nb.png": {"etag": "e", "size": 1}, "x\n::stop-commands::y": {"etag": "e", "size": 1}},
+            None, {}, lambda k: False, True)
+        self.assertEqual(s3["deletes"], [])
+        self.assertEqual(s3["unsafe_keys"], ["img/a\nb.png"])
+        for x in s3["drift"]:
+            self.assertNotIn("\n", x["key"])
 
 
 if __name__ == "__main__":

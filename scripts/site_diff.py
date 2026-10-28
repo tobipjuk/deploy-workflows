@@ -231,6 +231,15 @@ def prefix_of(policy, key):
     return "(root)"
 
 
+def key_ok(key):
+    """True if key passes site_policy.check_key (the apply refuses any other key)."""
+    try:
+        sp.check_key(key)
+    except sp.PolicyError:
+        return False
+    return True
+
+
 def is_code_key(key):
     return sp.ext_of(key).lower() in sp.CODE_TYPES
 
@@ -247,10 +256,10 @@ def compute_s3(policy, desired, live, manifest, live_text, binary_match, adoptio
                   and, in adoption, every binary key that matched by ETag (HEAD)
     An object is unchanged only if its bytes AND its Content-Type and Cache-Control are the
     desired ones (Guardian on f944888, M1); a metadata-only difference is an update with
-    reason "metadata". Returns dict with puts, deletes, adopted, drift, outside.
-    """
+    reason "metadata". Returns dict with puts, deletes, adopted, drift, outside, unsafe_keys
+    (live keys in SITE that fail site_policy.check_key: never planned for delete)."""
     live_meta = live_meta or {}
-    puts, deletes, adopted, drift, outside = [], [], [], [], []
+    puts, deletes, adopted, drift, outside, unsafe = [], [], [], [], [], []
     for key in sorted(desired):
         d = desired[key]
         lv = live.get(key)
@@ -298,7 +307,14 @@ def compute_s3(policy, desired, live, manifest, live_text, binary_match, adoptio
             continue
         if not sp.in_site(policy, key):
             outside.append(key)
-            drift.append({"key": key, "what": "live object outside SITE (the deploy role can't delete it)"})
+            drift.append({"key": one_line(key), "what": "live object outside SITE (the deploy role can't delete it)"})
+            continue
+        if not key_ok(key):
+            # The apply's check_key would refuse this delete after the approval: like an
+            # outside-SITE object, it is cleaned up on the Mac (Guardian on fff80e5, L2).
+            unsafe.append(key)
+            drift.append({"key": one_line(key), "what": "live object in SITE with a key the pipeline refuses "
+                                                        "(it can't delete it)"})
             continue
         if manifest is not None and key not in manifest:
             drift.append({"key": key, "what": "extra live object (not in the manifest): planned for delete"})
@@ -307,7 +323,8 @@ def compute_s3(policy, desired, live, manifest, live_text, binary_match, adoptio
         for key in sorted(manifest):
             if key not in desired and key not in live:
                 drift.append({"key": key, "what": "in the manifest but missing live (dropped from the manifest)"})
-    return {"puts": puts, "deletes": deletes, "adopted": adopted, "drift": drift, "outside": outside}
+    return {"puts": puts, "deletes": deletes, "adopted": adopted, "drift": drift, "outside": outside,
+            "unsafe_keys": unsafe}
 
 
 def check_settings(expected, live):

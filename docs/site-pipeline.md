@@ -93,7 +93,8 @@ neither a member nor ignored, a member over 256 KB or not text, live Lambda code
 its `CodeSha256`, an invalid manifest.
 
 **Not deployable** (card without buttons, no bundle): live settings ≠ `deploy/site.json`, a live
-object outside SITE ("clean up on the Mac"), the gate's DEVELOPMENT config ≠ LIVE, a code diff
+object outside SITE or a live object in SITE whose key fails the key rules (`check_key`: the
+apply would refuse its delete after the approval; Guardian on fff80e5, L2) ("clean up on the Mac"), the gate's DEVELOPMENT config ≠ LIVE, a code diff
 that doesn't fit (`diff_complete: false`), a summary too large, no deploy role.
 
 **Adoption** (no manifest yet; only a hand-dispatched run): text keys adopt by live bytes

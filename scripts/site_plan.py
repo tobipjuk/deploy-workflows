@@ -460,6 +460,9 @@ class Planner:
                 attention.append(sd._att(f"s3:{k}", "Delete of a root or code key", "delete", k))
         if s3["outside"]:
             reasons.append(f"{len(s3['outside'])} live object(s) outside SITE: clean up on the Mac")
+        if s3["unsafe_keys"]:
+            reasons.append(f"{len(s3['unsafe_keys'])} live object(s) in SITE with keys the pipeline refuses: "
+                           "clean up on the Mac")
         if drift:
             if len(drift) <= 20:
                 for x in drift:
