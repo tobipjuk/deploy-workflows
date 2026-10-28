@@ -83,13 +83,16 @@ def text_diff(old, new, old_label, new_label):
     b = new.split("\n")
     added = removed = invis = 0
     lines = []
-    for ln in difflib.unified_diff(a, b, fromfile="/dev/null" if old is None else old_label,
-                                   tofile=new_label, n=DIFF_CONTEXT, lineterm=""):
-        if ln.startswith("+") and not ln.startswith("+++"):
+    # unified_diff emits exactly two header lines (--- / +++) and then hunks: every later line
+    # is classified by its first character only, so content that starts with "++" or "--"
+    # (e.g. "++i;") still counts as an added or removed line (Guardian on fff80e5, L1).
+    for i, ln in enumerate(difflib.unified_diff(a, b, fromfile="/dev/null" if old is None else old_label,
+                                                tofile=new_label, n=DIFF_CONTEXT, lineterm="")):
+        if i >= 2 and ln.startswith("+"):
             added += 1
             esc, c = escape_line(ln)
             invis += c
-        elif ln.startswith("-") and not ln.startswith("---"):
+        elif i >= 2 and ln.startswith("-"):
             removed += 1
             esc, _ = escape_line(ln)
         else:
@@ -107,8 +110,13 @@ def one_line(s):
 def count_nonascii_letters_added(diff_text):
     """Letters outside ASCII and combining marks in a diff's added lines (homoglyph hint)."""
     n = 0
-    for ln in diff_text.split("\n"):
-        if ln.startswith("+") and not ln.startswith("+++"):
+    lines = diff_text.split("\n")
+    # Skip only the two header lines text_diff starts with; an added line whose content starts
+    # with "++" is still an added line (Guardian on fff80e5, L1).
+    if len(lines) >= 2 and lines[0].startswith("--- ") and lines[1].startswith("+++ "):
+        lines = lines[2:]
+    for ln in lines:
+        if ln.startswith("+"):
             for ch in ln:
                 if ord(ch) > 127 and unicodedata.category(ch)[0] in ("L", "M"):
                     n += 1

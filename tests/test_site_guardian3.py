@@ -1,5 +1,5 @@
 """Guardian review of origin/main..fff80e5: M1 (Lambda env var names unreadable under the plan
-role's kms:Decrypt deny)."""
+role's kms:Decrypt deny), L1 (diff lines starting with ++/--)."""
 import json
 import os
 import stat
@@ -96,6 +96,36 @@ class EnvNamesUnreadableTest(unittest.TestCase):
             self.assertIn("env_error:Environment.Error.ErrorCode", query)
             self.assertIn("env_names:keys(Environment.Variables || `{}`)", query)
             self.assertNotIn("Environment.Variables.", query)  # names only, never values
+
+
+class PlusPlusLineTest(unittest.TestCase):
+    """L1: content starting with ++ or -- is still an added/removed line."""
+
+    def test_counts_and_invisible(self):
+        t, a, r, inv = sd.text_diff("a\n", "a\n++i; // ‮\n", "live/x.js", "commit/x.js")
+        self.assertEqual((a, r, inv), (1, 0, 1))
+        self.assertIn("+++i; // <U+202E>", t)
+        t, a, r, inv = sd.text_diff("a\n-- x\n--- y\n", "a\n", "live/x.js", "commit/x.js")
+        self.assertEqual((a, r), (0, 2))
+
+    def test_fake_header_mid_diff_counts(self):
+        t, a, r, inv = sd.text_diff("a\n", "a\n++ /dev/null\n", "live/x.js", "commit/x.js")
+        self.assertEqual(a, 1)
+
+    def test_homoglyph_in_plusplus_line(self):
+        t, *_ = sd.text_diff("a\n", "a\n++аdmin;\n", "live/x.js", "commit/x.js")
+        self.assertEqual(sd.count_nonascii_letters_added(t), 1)
+        # the header's file name is not an added line
+        t, *_ = sd.text_diff("a\n", "a\nb\n", "live/а.js", "commit/а.js")
+        self.assertEqual(sd.count_nonascii_letters_added(t), 0)
+
+    def test_plan_flags_bidi_in_plusplus_line(self):
+        env = F.Env(self)
+        adopt(env)
+        env.commit({"site/sw.js": "// sw\n++i; // ‮\n".encode()})
+        rc, log = run_plan(env, event="push")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("Invisible or bidi characters", labels(summary(env)))
 
 
 if __name__ == "__main__":
