@@ -422,7 +422,7 @@ Digest 3b67c029...2d384e  Bundle 9f3e01aa...
 - NEEDS ATTENTION comes first, in the summary's order (`attention` is already ordered:
   invisible/bidi characters, gate, Lambda, `pin.html`, `sw.js`, Cache-Control or Content-Type,
   new Lambda members, non-text live members, deletes of root/code keys, LIVE DRIFT, settings
-  mismatch, non-ASCII letters in code, BASELINE ADOPTION). Show every entry: label, action,
+  mismatch, Lambda env var names unreadable, non-ASCII letters in code, BASELINE ADOPTION). Show every entry: label, action,
   address, and the non-null of `path`/`before`/`after`. If Telegram's 4,096 characters force a
   cut, never drop an "Invisible or bidi characters" entry; cut from the end of the list instead.
 - Then the per-prefix counts from `site.prefixes`, then the first 15 entries of `changes`

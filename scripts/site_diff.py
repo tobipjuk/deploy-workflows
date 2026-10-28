@@ -303,7 +303,11 @@ def compute_s3(policy, desired, live, manifest, live_text, binary_match, adoptio
 
 
 def check_settings(expected, live):
-    """Compare live Lambda settings with deploy/site.json. Returns a list of mismatching fields."""
+    """Compare live Lambda settings with deploy/site.json. Returns a list of mismatching fields.
+
+    When the env var names are unreadable (env_names_error), env_names is left out of the
+    comparison: Lambda then returns no names at all, so comparing would always mismatch (or,
+    with env_names: [], always match without checking anything). The caller says so on the card."""
     bad = []
     pairs = {
         "runtime": (expected["runtime"], live.get("runtime")),
@@ -317,6 +321,8 @@ def check_settings(expected, live):
         "kms_key_arn": (expected["kms_key_arn"] or None, live.get("kms_key_arn") or None),
         "package_type": (expected["package_type"], live.get("package_type") or "Zip"),
     }
+    if env_names_error(live):
+        del pairs["env_names"]
     for k, (want, got) in pairs.items():
         if want != got:
             bad.append({"field": k, "expected": want, "live": got})
@@ -324,6 +330,15 @@ def check_settings(expected, live):
         bad.append({"field": "state", "expected": "Active/Successful",
                     "live": f"{live.get('state')}/{live.get('last_update_status')}"})
     return bad
+
+
+def env_names_error(live):
+    """The error code Lambda returned instead of the environment (the plan role's kms:Decrypt
+    deny makes it AccessDeniedException), or None when the variable names were readable."""
+    code = live.get("env_error")
+    if not code:
+        return None
+    return one_line(str(code))[:64]
 
 
 def lambda_changes(policy, new_members, live_members, manifest_lambda):
@@ -380,6 +395,7 @@ ATTENTION_ORDER = [
     "Cache-Control or Content-Type",
     "New or renamed Lambda member", "Non-text member in the live Lambda zip",
     "Delete of a root or code key", "LIVE DRIFT", "Settings mismatch",
+    "Lambda env var names unreadable",
     "Non-ASCII letters or combining marks in code", "BASELINE ADOPTION",
 ]
 

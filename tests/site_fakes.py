@@ -79,6 +79,11 @@ class FakeAws:
         self.invalidations = {}
         self.calls = []
         self.faults = {}   # op name -> exception to raise (once per entry in a list) or callable
+        # The plan role denies kms:Decrypt, so Lambda can't decrypt the environment for it and
+        # GetFunctionConfiguration returns Environment = {"Error": {"ErrorCode":
+        # "AccessDeniedException"}} without Variables (seen live, Guardian on fff80e5 M1).
+        # True models a role that may decrypt (the names come back).
+        self.lambda_env_readable = False
         self.n = 0
 
     def _tick(self):
@@ -185,7 +190,10 @@ class FakeAws:
         c = f["config"]
         return {"runtime": c.get("runtime"), "handler": c.get("handler"), "memory_size": c.get("memory_size"),
                 "timeout": c.get("timeout"), "architectures": c.get("architectures"),
-                "env_names": sorted((c.get("env") or {}).keys()), "layers": c.get("layers") or None,
+                "env_names": sorted((c.get("env") or {}).keys()) if self.lambda_env_readable or not c.get("env")
+                else [],
+                "env_error": None if self.lambda_env_readable or not c.get("env") else "AccessDeniedException",
+                "layers": c.get("layers") or None,
                 "vpc_id": c.get("vpc_id"), "kms_key_arn": c.get("kms_key_arn"), "package_type": "Zip",
                 "revision_id": f["revision"], "code_sha256": b64sha(f["zip"]), "state": "Active",
                 "last_update_status": "Successful"}

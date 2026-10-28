@@ -445,6 +445,13 @@ class Planner:
                                      b["field"], json.dumps(b["live"])[:100], json.dumps(b["expected"])[:100]))
         if bad:
             reasons.append("live Lambda settings differ from deploy/site.json: change them on the Mac first")
+        env_err = sd.env_names_error(live["lambda"]["config"])
+        unverified = ["env_names"] if env_err else []
+        if env_err:
+            attention.append(sd._att(f"lambda:{pol['lambda']['function_name']}", "Lambda env var names unreadable",
+                                     "info", "env_names", None,
+                                     f"env var names unreadable (KMS denied: {env_err}): not compared with "
+                                     "deploy/site.json"))
 
         # Deletes, drift, outside-SITE objects
         for dl in s3["deletes"]:
@@ -531,7 +538,7 @@ class Planner:
             "changes": changes, "counts": counts, "destructive": destructive, "attention": attention,
             "attention_truncated": att_trunc, "diffs": kept, "code_complete": code_complete,
             "data_truncated": data_truncated, "reasons": reasons, "drift": drift, "prefixes": prefixes,
-            "adoption": adoption, "settings": {"mismatch": bad},
+            "adoption": adoption, "settings": {"mismatch": bad, "unverified": unverified},
             "has_changes": bool(changes),
         }
 
@@ -554,6 +561,7 @@ def summary_doc(res, meta, deploy_enabled):
             "adoption": res["adoption"], "not_deployable": reasons, "prefixes": res["prefixes"],
             "drift": res["drift"], "diffs": res["diffs"], "data_diffs_truncated": res["data_truncated"],
             "settings_mismatch": res["settings"]["mismatch"],
+            "settings_unverified": res["settings"]["unverified"],
             "plan_sha256": hashlib.sha256(site_bundle.canonical_json(res["plan"])).hexdigest(),
         },
     }

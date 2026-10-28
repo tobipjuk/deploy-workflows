@@ -67,6 +67,17 @@ and must be in the policy's `allowed_cache` for that root key or prefix.
 ("change it on the Mac first"). Content types come only from the extension table, checked on
 both the key and the source (they must agree).
 
+**Env var names under the KMS deny** (Guardian on fff80e5, M1): Lambda decrypts the environment
+on the caller's behalf, and the plan role is denied `kms:Decrypt` (`DenySecrets`), so
+GetFunctionConfiguration returns `Environment = {"Error": {"ErrorCode": "AccessDeniedException"}}`
+and no variables. `site_aws.py` projects that code (`env_error`); while it is set the names are
+**not compared** (neither a mismatch nor a match), `site.settings_unverified` is `["env_names"]`
+and NEEDS ATTENTION shows "Lambda env var names unreadable" ("env var names unreadable (KMS
+denied: AccessDeniedException): not compared with deploy/site.json"). The other settings are still
+compared. The plan role is deliberately **not** granted `kms:Decrypt` for this: it would hand it
+the values, not just the names. Keep `env_names` in `deploy/site.json` accurate anyway (a role
+that can read them compares them).
+
 ## Plan
 
 `site_plan.py` exit codes: 0 ok, 1 refused, 3 no baseline on a push (the run fails, round 5 L3),
@@ -123,12 +134,13 @@ form), `counts`, `has_changes`, `destructive`, `deployable`, `blocked` (always `
 | `site.data_diffs_truncated` | data (`.txt .ldr .mpd .py`) diffs dropped for size; code never is |
 | `site.drift` | `{key, what}` |
 | `site.settings_mismatch` | `{field, expected, live}` |
+| `site.settings_unverified` | settings that couldn't be read and weren't compared: `["env_names"]` under the plan role's KMS deny, else `[]` |
 | `site.plan_sha256` | sha256 of the bundle's `plan.json`: binds summary and bundle |
 
 NEEDS ATTENTION order (labels): Invisible or bidi characters, Gate code, Gate DEVELOPMENT
 differs from LIVE, Lambda code, PIN page, Service worker, Cache-Control or Content-Type, New or
 renamed Lambda member, Non-text member in the live Lambda zip, Delete of a root or code key,
-LIVE DRIFT, Settings mismatch, Non-ASCII letters or combining marks in code, BASELINE ADOPTION.
+LIVE DRIFT, Settings mismatch, Lambda env var names unreadable, Non-ASCII letters or combining marks in code, BASELINE ADOPTION.
 Up to 60 entries (drift over 20 keys is one entry); invisible/bidi entries are never dropped by
 the cap (Guardian L4).
 

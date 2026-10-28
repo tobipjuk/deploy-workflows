@@ -135,11 +135,15 @@ class CliAws:
                 "revision_id": doc["r"]}
 
     def lambda_get_configuration(self, name):
-        # Only names of environment variables, never values.
+        # Only names of environment variables, never values. Under the plan role's kms:Decrypt
+        # deny, Lambda returns Environment = {"Error": {"ErrorCode": "AccessDeniedException", ...}}
+        # and no Variables: env_error carries that code so the caller can tell "unreadable" from
+        # "no variables" (Guardian on fff80e5, M1).
         doc = self._run("lambda:GetFunctionConfiguration",
                         ["lambda", "get-function-configuration", f"--function-name={name}"],
                         query="{runtime:Runtime,handler:Handler,memory_size:MemorySize,timeout:Timeout,"
                               "architectures:Architectures,env_names:keys(Environment.Variables || `{}`),"
+                              "env_error:Environment.Error.ErrorCode,"
                               "layers:Layers[].Arn,vpc_id:VpcConfig.VpcId,kms_key_arn:KMSKeyArn,"
                               "package_type:PackageType,revision_id:RevisionId,code_sha256:CodeSha256,"
                               "state:State,last_update_status:LastUpdateStatus}")
