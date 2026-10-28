@@ -446,7 +446,7 @@ class Planner:
         if bad:
             reasons.append("live Lambda settings differ from deploy/site.json: change them on the Mac first")
         env_err = sd.env_names_error(live["lambda"]["config"])
-        unverified = ["env_names"] if env_err else []
+        settings_unverified = ["env_names"] if env_err else []
         if env_err:
             attention.append(sd._att(f"lambda:{pol['lambda']['function_name']}", "Lambda env var names unreadable",
                                      "info", "env_names", None,
@@ -545,7 +545,7 @@ class Planner:
             "attention_truncated": att_trunc, "diffs": kept, "code_complete": code_complete,
             "data_hidden": data_hidden, "attention_all": attention_all,
             "data_truncated": data_truncated, "reasons": reasons, "drift": drift, "prefixes": prefixes,
-            "adoption": adoption, "settings": {"mismatch": bad, "unverified": unverified},
+            "adoption": adoption, "settings": {"mismatch": bad, "unverified": settings_unverified},
             "has_changes": bool(changes),
         }
 

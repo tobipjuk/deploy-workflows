@@ -228,6 +228,31 @@ class DataWithoutDiffTest(unittest.TestCase):
                          ["4 data files changed without a diff on the card (full content in the commit)"])
 
 
+class LfsNoteTest(unittest.TestCase):
+    """Guardian on e90b777, 1: the settings' unverified list must not replace the adoption's
+    list of LFS objects that were only magic-checked."""
+
+    def adoption_note(self, env_readable, new_lfs):
+        env = F.Env(self)
+        env.aws.lambda_env_readable = env_readable
+        if new_lfs:
+            blobs = [F.WEBP + b"new page %d" % i for i in range(new_lfs)]
+            env.commit({f"building-instructions/pages/public/def456/p{i:03}.webp": F.pointer(b)
+                        for i, b in enumerate(blobs)}, lfs=blobs)
+        rc, log = run_plan(env)
+        self.assertEqual(rc, 0, log)
+        return [a for a in summary(env)["attention"] if a["label"] == "BASELINE ADOPTION"][0]["after"]
+
+    def test_env_readable_new_lfs_counted(self):
+        self.assertIn(", 2 LFS objects magic-checked unverified", self.adoption_note(True, 2))
+
+    def test_env_unreadable_no_lfs_no_note(self):
+        self.assertNotIn("magic-checked unverified", self.adoption_note(False, 0))
+
+    def test_env_unreadable_new_lfs_counted(self):
+        self.assertIn(", 3 LFS objects magic-checked unverified", self.adoption_note(False, 3))
+
+
 class InvalidationPathTest(unittest.TestCase):
     """Optional follow-up: keys with + & = , @ are invalidated in the raw and the encoded form."""
 
