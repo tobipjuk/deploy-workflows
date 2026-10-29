@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
@@ -36,6 +37,12 @@ import site_policy as sp  # noqa: E402
 
 SITE_JSON = "deploy/site.json"
 MANIFEST_SCHEMA = 1
+LFS_WORKERS = 8           # parallel LFS downloads in adoption (peak disk: 8 x the largest object)
+LFS_ACTION_MARGIN = 300   # re-ask the LFS batch API this many seconds before a download href expires
+
+
+def _progress(line):
+    print(line, flush=True)
 
 
 class NoBaseline(Exception):
@@ -279,24 +286,42 @@ class Planner:
         lfs_dir = os.path.join(self.workdir, "lfs")
         os.makedirs(lfs_dir, exist_ok=True)
         actions = self.lfs.batch(set(lfs_objs.values())) if lfs_objs else {}
+        batched_at = time.monotonic()
         missing = sorted({oid for oid, a in actions.items() if a is None})
         if missing:
             keys = sorted(k for k, (o, _) in lfs_objs.items() if o in missing)
             raise sd.Refused(f"{len(missing)} LFS object(s) are not in GitHub's LFS store, e.g. {keys[:3]}")
 
-        def fetch_verified(key):
-            oid, size = lfs_objs[key]
+        def action_for(oid):
+            # GitHub's download hrefs expire (expires_in 3600 s): a stale one would fail late in
+            # a long adoption; None makes lfs_fetch ask the batch API again for this object.
+            a = actions.get(oid)
+            exp = a.get("expires_in") if isinstance(a, dict) else None
+            if isinstance(exp, int) and time.monotonic() - batched_at > exp - LFS_ACTION_MARGIN:
+                return None
+            return a
+
+        def fetch_oid(oid, size, src):
             p = os.path.join(lfs_dir, oid)
             if not os.path.exists(p):
                 try:
-                    self.lfs.fetch(oid, size, p, action=actions.get(oid))
+                    self.lfs.fetch(oid, size, p, action=action_for(oid))
                 except lfs_fetch.LfsError as err:
-                    raise sd.Refused(f"{desired[key]['source_path']}: {err}") from None
+                    raise sd.Refused(f"{src}: {err}") from None
+            return p
+
+        def fetch_verified(key):
+            oid, size = lfs_objs[key]
+            p = fetch_oid(oid, size, desired[key]["source_path"])
             with open(p, "rb") as f:
                 verified_heads[key] = f.read(sp.MAGIC_BYTES_NEEDED)
             return p
 
+        matched = {}  # adoption: key -> does the live ETag match the commit's bytes
+
         def binary_match(key):  # adoption only: by live ETag (MD5 / multipart), binary keys only
+            if key in matched:
+                return matched[key]
             d, lv = desired[key], live["listing"][key]
             if d["source"]["type"] == "blob":
                 whole, parts = sd.md5_info_bytes(bytes_by_sha[d["sha256"]])
@@ -307,15 +332,39 @@ class Planner:
             return sd.etag_equal(lv["etag"], whole, parts)
 
         if adoption:
-            # Binary keys can only be adopted if their metadata is the desired one too: HEAD every
-            # live binary key of the right size (in parallel; adoption runs about once).
+            # Binary keys can only be adopted if their bytes (live ETag vs the commit's MD5) and
+            # their metadata are the desired ones. compute_s3 asks binary_match for exactly the
+            # live binary keys of the right size; both their HEADs and their LFS bytes are
+            # fetched here in parallel first (run 40854404792: ~9,000 keys one by one ran out
+            # of the job's 45 minutes). Same keys, same checks, same results.
             heads = [k for k, d in desired.items() if d["class"] == "binary" and k in live["listing"]
                      and live["listing"][k]["size"] == d["size"]]
             if heads:
-                from concurrent.futures import ThreadPoolExecutor
-                with ThreadPoolExecutor(max_workers=8) as ex:
-                    for k, meta in zip(heads, ex.map(lambda k: self.aws.head_object(pol["bucket"], k), heads)):
-                        live["live_meta"][k] = meta
+                print(f"site plan: adoption, {len(heads)} live binary keys to compare "
+                      f"({sum(1 for k in heads if k in lfs_objs)} from LFS)", flush=True)
+                live["live_meta"].update(self.aws.head_objects(pol["bucket"], heads, progress=_progress))
+                by_oid = {}
+                for k in heads:
+                    if k in lfs_objs:
+                        by_oid.setdefault(lfs_objs[k], []).append(k)
+
+                def md5_oid(obj):
+                    oid, size = obj
+                    p = fetch_oid(oid, size, desired[by_oid[obj][0]]["source_path"])
+                    try:
+                        with open(p, "rb") as f:
+                            magic = f.read(sp.MAGIC_BYTES_NEEDED)
+                        whole, parts = sd.md5_info_file(p)
+                    finally:
+                        os.unlink(p)
+                    return magic, whole, parts
+
+                got = site_aws.run_parallel(md5_oid, sorted(by_oid), LFS_WORKERS, "LFS fetch + MD5", _progress)
+                for obj, ks in by_oid.items():
+                    magic, whole, parts = got[obj]
+                    for k in ks:
+                        verified_heads[k] = magic
+                        matched[k] = sd.etag_equal(live["listing"][k]["etag"], whole, parts)
         s3 = sd.compute_s3(pol, desired, live["listing"], manifest_objs, live["live_text"], binary_match, adoption,
                            live["live_meta"])
         unverified = []
@@ -328,7 +377,7 @@ class Planner:
                 if adoption:
                     oid, size = lfs_objs[key]
                     try:
-                        head = self.lfs.head(oid, size, sp.MAGIC_BYTES_NEEDED, action=actions.get(oid))
+                        head = self.lfs.head(oid, size, sp.MAGIC_BYTES_NEEDED, action=action_for(oid))
                     except lfs_fetch.LfsError:
                         fetch_verified(key)
                         head = verified_heads[key]
