@@ -1,0 +1,96 @@
+{
+ "Version": "2012-10-17",
+ "Statement": [
+  {
+   "Sid": "LambdaRead",
+   "Effect": "Allow",
+   "Action": [
+    "lambda:GetFunction",
+    "lambda:GetFunctionConfiguration"
+   ],
+   "Resource": "arn:aws:lambda:eu-west-2:880207437749:function:ev3-workshop-progress-api"
+  },
+  {
+   "Sid": "GateRead",
+   "Effect": "Allow",
+   "Action": [
+    "cloudfront:GetFunction",
+    "cloudfront:DescribeFunction"
+   ],
+   "Resource": "arn:aws:cloudfront::880207437749:function/ev3-workshop-site-pin"
+  },
+  {
+   "Sid": "SiteListing",
+   "Effect": "Allow",
+   "Action": [
+    "s3:ListBucket"
+   ],
+   "Resource": "arn:aws:s3:::ev3-workshop-880207437749"
+  },
+  {
+   "Sid": "SiteObjectsRead",
+   "Effect": "Allow",
+   "Action": [
+    "s3:GetObject"
+   ],
+   "Resource": [
+    "arn:aws:s3:::ev3-workshop-880207437749/index.html",
+    "arn:aws:s3:::ev3-workshop-880207437749/pin.html",
+    "arn:aws:s3:::ev3-workshop-880207437749/book.html",
+    "arn:aws:s3:::ev3-workshop-880207437749/sw.js",
+    "arn:aws:s3:::ev3-workshop-880207437749/community.json",
+    "arn:aws:s3:::ev3-workshop-880207437749/img/*",
+    "arn:aws:s3:::ev3-workshop-880207437749/fonts/*",
+    "arn:aws:s3:::ev3-workshop-880207437749/pages/*",
+    "arn:aws:s3:::ev3-workshop-880207437749/instructions/*",
+    "arn:aws:s3:::ev3-workshop-880207437749/community/*"
+   ]
+  },
+  {
+   "Sid": "ManifestRead",
+   "Effect": "Allow",
+   "Action": [
+    "s3:GetObject"
+   ],
+   "Resource": "arn:aws:s3:::ev3-workshop-deploy-880207437749/deployed-manifest.json"
+  },
+  {
+   "Sid": "ManifestListOwnKey",
+   "Effect": "Allow",
+   "Action": [
+    "s3:ListBucket"
+   ],
+   "Resource": "arn:aws:s3:::ev3-workshop-deploy-880207437749",
+   "Condition": {
+    "StringEquals": {
+     "s3:prefix": [
+      "deployed-manifest.json"
+     ]
+    }
+   }
+  },
+  {
+   "Sid": "DenyEverythingElse",
+   "Effect": "Deny",
+   "NotAction": [
+    "s3:GetObject",
+    "s3:ListBucket",
+    "lambda:GetFunction",
+    "lambda:GetFunctionConfiguration",
+    "cloudfront:GetFunction",
+    "cloudfront:DescribeFunction"
+   ],
+   "Resource": "*"
+  },
+  {
+   "Sid": "DenySecrets",
+   "Effect": "Deny",
+   "Resource": "*",
+   "Action": [
+    "cloudfront-keyvaluestore:*",
+    "secretsmanager:GetSecretValue",
+    "kms:Decrypt"
+   ]
+  }
+ ]
+}

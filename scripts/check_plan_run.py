@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Check that the plan run a deploy was dispatched for is one that may be applied.
 
-  check_plan_run.py --repo OWNER/REPO --run-id ID --expected-sha SHA
+  check_plan_run.py --repo OWNER/REPO --run-id ID --expected-sha SHA [--kind terraform|site]
                     [--max-age-seconds 7200] [--plan-workflow .github/workflows/plan.yml]
                     [--reusable OWNER/deploy-workflows/.github/workflows/tf-plan.yml]
+
+--kind picks the reusable plan workflow and its job name: terraform = tf-plan.yml and
+"<caller> / terraform plan" (default), site = site-plan.yml and "<caller> / site plan". A run of
+one kind is never accepted as the other.
 
 Needs GITHUB_TOKEN (actions: read) in the environment. The same rules are what Orion applies
 before it offers a plan in Telegram (docs/orion-interface.md), so a plan Tobi could approve is
@@ -16,8 +20,9 @@ also one tf-apply accepts:
     newer commit on main supersedes it
   - it is the newest successful plan run on main
   - it started less than --max-age-seconds ago (2 h)
-  - it referenced tf-plan.yml and tf-attest.yml, and every referenced reusable workflow is
-    from deploy-workflows at refs/heads/main
+  - its referenced workflows are EXACTLY the set {<plan workflow of the kind>, tf-attest.yml},
+    both from deploy-workflows at refs/heads/main (nothing else, so a site run can't pass as a
+    terraform run or the other way round)
   - it has exactly two jobs over all attempts (tf-plan's plan job and the nested attest job),
     both completed/success: no extra job that could swap or self-attest artifacts
 """
@@ -31,15 +36,22 @@ import urllib.parse
 import urllib.request
 
 API = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+DW = "tobipjuk/deploy-workflows/.github/workflows/"
+KINDS = {
+    "terraform": {"reusable": DW + "tf-plan.yml", "plan_job": " / terraform plan"},
+    "site": {"reusable": DW + "site-plan.yml", "plan_job": " / site plan"},
+}
 
 
 def parse_time(s):
     return dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
 
 
-def evaluate(run, latest_id, now, repo, expected_sha, plan_workflow, reusable, max_age, jobs=None):
+def evaluate(run, latest_id, now, repo, expected_sha, plan_workflow, reusable, max_age, jobs=None,
+             kind="terraform"):
     """jobs = the run's jobs from /jobs?filter=all (None = not checked)."""
     problems = []
+    plan_job = KINDS[kind]["plan_job"]
     path = str(run.get("path") or "")
     if path != plan_workflow and not path.startswith(plan_workflow + "@"):
         problems.append(f"run is not of {plan_workflow} (path {path!r})")
@@ -67,6 +79,13 @@ def evaluate(run, latest_id, now, repo, expected_sha, plan_workflow, reusable, m
     for r in refs:
         if not (str(r.get("path", "")).startswith(anchor) and r.get("ref") == "refs/heads/main"):
             problems.append(f"run references a workflow outside {anchor}@refs/heads/main: {r.get('path')!r}")
+    # Exactly the two files of this kind (site plan design, section 2): e.g. a site run that also
+    # pulls in tf-plan.yml, or a terraform run that pulls in site-plan.yml, is refused.
+    paths = {str(r.get("path", "")).split("@", 1)[0] for r in refs}
+    if paths != {reusable, attest}:
+        extra = sorted(paths - {reusable, attest})
+        if extra:
+            problems.append(f"run references workflows other than exactly {reusable} + tf-attest.yml: {extra}")
     # Exactly the two jobs of tf-plan.yml, over all attempts, both successful: the plan job
     # ("<caller> / terraform plan") and the nested attest job ("<caller> / attest / attest plan
     # artifacts"). An extra job in the same run could replace the artifacts or call tf-attest.yml
@@ -76,7 +95,7 @@ def evaluate(run, latest_id, now, repo, expected_sha, plan_workflow, reusable, m
         names = sorted(str((j or {}).get("name", "")) for j in jobs)
         if len(jobs) != 2:
             problems.append(f"plan run has {len(jobs)} jobs (all attempts); exactly 2 (plan + attest) are required")
-        elif not (any(n.endswith(" / terraform plan") for n in names)
+        elif not (any(n.endswith(plan_job) for n in names)
                   and any(n.endswith(" / attest / attest plan artifacts") for n in names)):
             problems.append(f"plan run jobs are not tf-plan's plan + attest: {names}")
         for j in jobs:
@@ -111,9 +130,11 @@ def main(argv=None):
     ap.add_argument("--expected-sha", required=True)
     ap.add_argument("--max-age-seconds", type=int, default=7200)
     ap.add_argument("--plan-workflow", default=".github/workflows/plan.yml")
-    ap.add_argument("--reusable", default="tobipjuk/deploy-workflows/.github/workflows/tf-plan.yml")
+    ap.add_argument("--kind", choices=sorted(KINDS), default="terraform")
+    ap.add_argument("--reusable", help="override the kind's plan workflow (tests only)")
     ap.add_argument("--facts-out", help="write run_attempt, run_started_at, updated_at as JSON")
     args = ap.parse_args(argv)
+    reusable = args.reusable or KINDS[args.kind]["reusable"]
     if not re.fullmatch(r"[1-9][0-9]{0,19}", args.run_id):
         print("::error::plan_run_id must be a run id (digits)", file=sys.stderr)
         return 1
@@ -145,7 +166,8 @@ def main(argv=None):
     if count < 0:
         jobs = [None, None]  # unreadable count: fail closed
     problems = evaluate(run, latest_id, dt.datetime.now(dt.timezone.utc), args.repo,
-                        args.expected_sha, args.plan_workflow, args.reusable, args.max_age_seconds, jobs)
+                        args.expected_sha, args.plan_workflow, reusable, args.max_age_seconds, jobs,
+                        kind=args.kind)
     for p in problems:
         print(f"::error::Plan run {args.run_id}: {p}", file=sys.stderr)
     if problems:

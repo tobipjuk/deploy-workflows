@@ -85,5 +85,57 @@ class RunShapeTest(unittest.TestCase):
         self.assertTrue(any("4 jobs" in p for p in evaluate(doc)))
 
 
+
+def site_variant(jobs=("plan / site plan", "plan / attest / attest plan artifacts"),
+                 refs=("site-plan.yml", "tf-attest.yml")):
+    """A site plan run, derived from the observed a-stub shape: the caller's job calls
+    site-plan.yml, whose second job nests tf-attest.yml (synthetic: not observed on GitHub)."""
+    doc = load("a-stub")
+    run = dict(doc["run"])
+    run["referenced_workflows"] = [{"path": f"tobipjuk/deploy-workflows/.github/workflows/{r}@main",
+                                    "ref": "refs/heads/main", "sha": "d" * 40} for r in refs]
+    job_list = [{"name": n, "status": "completed", "conclusion": "success", "run_attempt": 1} for n in jobs]
+    return run, job_list
+
+
+def evaluate_kind(run, job_list, kind):
+    now = cpr.parse_time(run["run_started_at"]) + dt.timedelta(minutes=10)
+    return cpr.evaluate(run, run["id"], now, run["repository"]["full_name"], run["head_sha"],
+                        ".github/workflows/plan.yml", cpr.KINDS[kind]["reusable"], 7200, jobs=job_list, kind=kind)
+
+
+class SiteRunShapeTest(unittest.TestCase):
+    def test_honest_site_run(self):
+        self.assertEqual(evaluate_kind(*site_variant(), "site"), [])
+
+    def test_site_run_is_not_a_terraform_run(self):
+        self.assertTrue(evaluate_kind(*site_variant(), "terraform"))
+
+    def test_terraform_run_is_not_a_site_run(self):
+        run, jobs = site_variant(jobs=("plan / terraform plan", "plan / attest / attest plan artifacts"),
+                                 refs=("tf-plan.yml", "tf-attest.yml"))
+        self.assertEqual(evaluate_kind(run, jobs, "terraform"), [])
+        self.assertTrue(evaluate_kind(run, jobs, "site"))
+
+    def test_exact_set_of_referenced_workflows(self):
+        """L3: a run that also references tf-plan.yml (or any third deploy-workflows file) is refused,
+        even with exactly two successful jobs."""
+        for refs in (("site-plan.yml", "tf-attest.yml", "tf-plan.yml"),
+                     ("site-plan.yml", "tf-attest.yml", "site-apply.yml"),
+                     ("site-plan.yml",), ("tf-attest.yml",)):
+            with self.subTest(refs=refs):
+                self.assertTrue(evaluate_kind(*site_variant(refs=refs), "site"))
+        run, jobs = site_variant(jobs=("plan / terraform plan", "plan / attest / attest plan artifacts"),
+                                 refs=("tf-plan.yml", "tf-attest.yml", "site-plan.yml"))
+        self.assertTrue(evaluate_kind(run, jobs, "terraform"))
+
+    def test_site_job_shapes(self):
+        for jobs in (("plan / site plan",), ("plan / site plan", "plan / attest / attest plan artifacts", "x"),
+                     ("plan / terraform plan", "plan / attest / attest plan artifacts"),
+                     ("plan / site plan", "plan / attest")):
+            with self.subTest(jobs=jobs):
+                self.assertTrue(evaluate_kind(*site_variant(jobs=jobs), "site"))
+
+
 if __name__ == "__main__":
     unittest.main()

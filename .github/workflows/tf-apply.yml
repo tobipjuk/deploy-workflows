@@ -158,7 +158,7 @@ jobs:
           TOOLS: ${{ steps.tools.outputs.dir }}
         run: |
           set -euo pipefail
-          python3 -I "$TOOLS/scripts/check_plan_run.py" --repo "$GITHUB_REPOSITORY" \
+          python3 -I "$TOOLS/scripts/check_plan_run.py" --kind terraform --repo "$GITHUB_REPOSITORY" \
             --run-id "$PLAN_RUN_ID" --expected-sha "$GITHUB_SHA" --max-age-seconds 7200 \
             --facts-out "$RUNNER_TEMP/plan-run.json"
 
@@ -208,6 +208,14 @@ jobs:
             --sha "$GITHUB_SHA" --not-before "$started" --not-after "$updated" \
             --expect-bundle-sha256 "$BUNDLE_SHA256" --expect-digest "$CHANGES_DIGEST"
           echo "Plan attestation verified (tf-plan.yml@main, run $PLAN_RUN_ID attempt $attempt)" >> "$GITHUB_STEP_SUMMARY"
+          # tf-attest.yml is shared with site-plan.yml: its token proves the bytes, not the kind.
+          # The run shape (--kind terraform) already refuses site runs; the attested summary's
+          # kind must be terraform (or absent, for summaries made before the field existed).
+          python3 -I - "$d/summary/plan-summary.json" <<'PY'
+          import json, sys
+          kind = json.load(open(sys.argv[1], encoding="utf-8")).get("kind", "terraform")
+          sys.exit(0 if kind == "terraform" else f"::error::plan kind {kind!r} is not applied by tf-apply")
+          PY
 
       - name: Verify the plan bundle and put it in place
         env:

@@ -4,7 +4,9 @@
   deploy_result.py --checks-dir DIR --out FILE [--github-output FILE]
 
 Environment (from tf-apply.yml): APPLY_OUTCOME (steps.apply.outcome), ADD/CHANGE/DESTROY/REPLACE,
-TARGET, PLAN_RUN_ID, BUNDLE_SHA256, CHANGES_DIGEST, GITHUB_REPOSITORY/SHA/RUN_ID.
+TARGET, PLAN_RUN_ID, BUNDLE_SHA256, CHANGES_DIGEST, GITHUB_REPOSITORY/SHA/RUN_ID, and PARTIAL=true
+from site-apply.yml when a site deploy failed after writing something (the summary then says so;
+the status stays "failed").
 DIR holds one file per post-apply check (egress, invalidation, smoke) with ok | failed |
 pending | warning; a missing file means the check didn't run (skipped).
 
@@ -34,9 +36,10 @@ def read_checks(d):
     return out
 
 
-def summarise(applied, checks):
+def summarise(applied, checks, partial=False):
     if not applied:
-        return "failed", "not applied"
+        return "failed", ("partially applied, see the run (the manifest records what was written)"
+                          if partial else "not applied")
     bad = {k: v for k, v in checks.items() if v not in ("ok", "skipped")}
     if not bad:
         return "deployed", "applied, checks ok"
@@ -51,7 +54,7 @@ def summarise(applied, checks):
 
 def build(env, checks):
     applied = env.get("APPLY_OUTCOME") == "success"
-    status, text = summarise(applied, checks)
+    status, text = summarise(applied, checks, env.get("PARTIAL") == "true")
 
     def count(k):
         v = env.get(k)

@@ -94,3 +94,17 @@ So a deploy credential needs all of: this repo, branch main, a `workflow_dispatc
 the approver App (whose private key is only on Orion's server), first attempt, and the job
 running inside `tf-apply.yml` from deploy-workflows' main. Tobi's own token (and so the box)
 can dispatch `deploy.yml`, but then `actor` is `tobipjuk` and AWS refuses.
+
+## Site projects (`site-plan.yml` / `site-apply.yml`)
+
+Same sub template, same rules; only the reusable workflow names differ (`docs/site-pipeline.md`):
+
+```
+plan role:   repo:<repo>:ref:refs/heads/main:event_name:push:actor:*:run_attempt:*:job_workflow_ref:tobipjuk/deploy-workflows/.github/workflows/site-plan.yml@refs/heads/main
+             repo:<repo>:ref:refs/heads/main:event_name:workflow_dispatch:actor:*:run_attempt:*:job_workflow_ref:tobipjuk/deploy-workflows/.github/workflows/site-plan.yml@refs/heads/main
+deploy role: repo:<repo>:ref:refs/heads/main:event_name:workflow_dispatch:actor:<app-slug>[bot]:run_attempt:1:job_workflow_ref:tobipjuk/deploy-workflows/.github/workflows/site-apply.yml@refs/heads/main
+```
+
+A site project's roles must never trust `tf-plan.yml`/`tf-apply.yml`, and a Terraform project's
+never `site-plan.yml`/`site-apply.yml`. The module's `pipeline = "site"` (not built yet) will set
+these; the identity policies are drafted by `scripts/site_iam.py`.

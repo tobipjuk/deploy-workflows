@@ -1,0 +1,210 @@
+# Reusable: plan a site deploy (S3 files, one Lambda's code, one CloudFront Function) with the
+# read-only plan role. No project code runs here: the commit is read as data.
+#
+# Called from the project's .github/workflows/plan.yml (on push to main + workflow_dispatch):
+#
+#   on:
+#     push: { branches: [main] }
+#     workflow_dispatch:
+#       inputs: { allow_destroy: { type: boolean, default: false } }
+#   jobs:
+#     plan:
+#       uses: tobipjuk/deploy-workflows/.github/workflows/site-plan.yml@main
+#       permissions: { id-token: write, contents: read }
+#       with: { target: ..., aws_region: ..., aws_account_id: ..., plan_role_arn: ..., deploy_enabled: ... }
+#
+# Everything that matters (bucket, keys, function names, manifest, gate tests) comes from the
+# trusted policy/site/<owner>/<repo>.json in this repository, chosen by github.repository. Inputs
+# may only agree with it. Design: lego-mindstorms docs/deploy-pipeline-design.md (rev. 3).
+#
+# The plan role trusts only jobs whose OIDC sub carries
+# job_workflow_ref = tobipjuk/deploy-workflows/.github/workflows/site-plan.yml@refs/heads/main.
+#
+# Output for Orion (docs/orion-interface.md section 11):
+#   artifact plan-summary      plan-summary.json, schema 1 + kind "site": counts, changes, NEEDS
+#                              ATTENTION, full code diffs (site.diffs), digest, bundle sha256
+#   artifact plan-bundle       plan.json + changed plain-git files + Lambda zip + gate code, 1 day;
+#                              only when the plan is deployable
+#   artifact plan-attestation  from the nested tf-attest.yml job (no project code)
+# Jobs of a run: exactly "site plan" and "attest / attest plan artifacts" (site-apply and Orion
+# refuse any other shape: scripts/check_plan_run.py --kind site).
+#
+# Why no sandbox: nothing from the project runs. The checkout is lfs: false and is only read
+# with `git ls-tree` / `git cat-file` (no filters, hooks, attributes, .lfsconfig); the scripts run
+# as `python3 -I` from the tools directory with the working directory outside the checkout; LFS
+# objects come from GitHub's LFS API through scripts/lfs_fetch.py, never `git lfs`. A build step,
+# if ever added, gets its own job without id-token or AWS, inside the sandbox.
+name: site-plan (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: Deploy target name; must equal the trusted policy's target
+        type: string
+        required: true
+      aws_region:
+        description: Must equal the policy's region
+        type: string
+        required: true
+      aws_account_id:
+        description: Must equal the policy's account
+        type: string
+        required: true
+      plan_role_arn:
+        type: string
+        required: true
+      deploy_enabled:
+        description: The project has a deploy role (vars.AWS_DEPLOY_ROLE_ARN set). Only then is a bundle uploaded.
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  plan:
+    name: site plan
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: site-plan-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      # Dispatch inputs come from the event payload, which the caller workflow can't rewrite.
+      ALLOW_DESTROY: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.allow_destroy == 'true' }}
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+      changes_digest: ${{ steps.plan.outputs.digest }}
+      bundle_sha256: ${{ steps.plan.outputs.bundle_sha256 }}
+      summary_sha256: ${{ steps.plan.outputs.summary_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          lfs: false
+          fetch-depth: 1
+
+      - name: deploy-workflows tools
+        id: tools
+        uses: tobipjuk/deploy-workflows/.github/actions/tools@main
+
+      # Trusted per-repo policy, chosen by the run's repository. No file = refused before any
+      # AWS call.
+      - name: Site policy (trusted, per repository)
+        env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
+          TARGET: ${{ inputs.target }}
+          REGION_INPUT: ${{ inputs.aws_region }}
+          ACCOUNT_INPUT: ${{ inputs.aws_account_id }}
+          ROLE_ARN: ${{ inputs.plan_role_arn }}
+        run: |
+          set -euo pipefail
+          [ -n "$ROLE_ARN" ] || { echo "::error::plan_role_arn is empty (repository variable not set?)"; exit 1; }
+          python3 -I "$TOOLS/scripts/site_policy.py" check-policy \
+            "$TOOLS/policy/site/$GITHUB_REPOSITORY.json" --repository "$GITHUB_REPOSITORY"
+          python3 -I - "$TOOLS/policy/site/$GITHUB_REPOSITORY.json" <<'PY'
+          import json, os, sys
+          p = json.load(open(sys.argv[1], encoding="utf-8"))
+          e = os.environ
+          bad = [k for k, v in (("target", e["TARGET"]), ("region", e["REGION_INPUT"]),
+                                ("account_id", e["ACCOUNT_INPUT"])) if p[k] != v]
+          acct = e["ROLE_ARN"].split(":")[4] if e["ROLE_ARN"].count(":") >= 5 else ""
+          if acct != p["account_id"]:
+              bad.append("plan_role_arn account")
+          sys.exit(f"::error::inputs disagree with the trusted site policy: {bad}" if bad else 0)
+          PY
+
+      - name: Show the OIDC subject
+        run: |
+          set -euo pipefail
+          tok=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | python3 -Ic 'import json,sys; print(json.load(sys.stdin)["value"])')
+          printf '%s' "$tok" | python3 -Ic '
+          import base64, json, sys
+          p = sys.stdin.read().split(".")[1]
+          print("OIDC sub:", json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4)))["sub"])'
+
+      - name: Assume the plan role (OIDC)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ inputs.plan_role_arn }}
+          role-session-name: gh-site-plan-${{ github.run_id }}
+          role-duration-seconds: 3600
+          aws-region: ${{ inputs.aws_region }}
+          allowed-account-ids: ${{ inputs.aws_account_id }}
+
+      # Reads the commit as data, LIVE with the plan role, LFS through the API (GITHUB_TOKEN,
+      # contents: read). Exit 3 = no baseline yet on a push: the run FAILS so it can't
+      # supersede the hand-dispatched adoption plan in Orion (round 5 L3).
+      - name: Site plan
+        id: plan
+        working-directory: ${{ runner.temp }}
+        env:
+          TOOLS: ${{ steps.tools.outputs.dir }}
+          TARGET: ${{ inputs.target }}
+          DEPLOYABLE: ${{ inputs.deploy_enabled }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/site-out"
+          now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          expires=$(date -u -d '+2 hours' +%Y-%m-%dT%H:%M:%SZ)
+          subject=$(git -C "$GITHUB_WORKSPACE" log -1 --format=%s "$GITHUB_SHA" | tr -cd '[:print:]' | cut -c1-120)
+          rc=0
+          python3 -I "$TOOLS/scripts/site_plan.py" --repo-dir "$GITHUB_WORKSPACE" --sha "$GITHUB_SHA" \
+            --repository "$GITHUB_REPOSITORY" --policy-dir "$TOOLS/policy/site" --event "$GITHUB_EVENT_NAME" \
+            --out-dir "$RUNNER_TEMP/site-out" --target "$TARGET" --deploy-enabled "$DEPLOYABLE" \
+            --allow-destroy "$ALLOW_DESTROY" --summary "$GITHUB_STEP_SUMMARY" --github-output "$GITHUB_OUTPUT" \
+            --meta "ref=$GITHUB_REF" --meta "event=$GITHUB_EVENT_NAME" --meta "actor=$GITHUB_ACTOR" \
+            --meta "run_id=$GITHUB_RUN_ID" --meta "run_attempt=$GITHUB_RUN_ATTEMPT" \
+            --meta "created_at=$now" --meta "expires_at=$expires" --meta "commit_subject=$subject" || rc=$?
+          case "$rc" in
+            0) ;;
+            3) echo "> **No baseline yet:** run plan.yml by hand (Run workflow) to make the adoption plan." >> "$GITHUB_STEP_SUMMARY"; exit 1 ;;
+            4) echo "> **Refused:** more deletes than the policy allows. Run plan.yml by hand with allow_destroy = true if intended." >> "$GITHUB_STEP_SUMMARY"; exit 1 ;;
+            *) exit 1 ;;
+          esac
+
+      - name: Upload the plan bundle
+        if: steps.plan.outputs.bundle_sha256 != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plan-bundle
+          path: ${{ runner.temp }}/site-out/plan-bundle.tar
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Upload the plan summary
+        if: steps.plan.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plan-summary
+          path: ${{ runner.temp }}/site-out/plan-summary.json
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Note when the plan is not deployable
+        if: steps.plan.outputs.has_changes == 'true' && steps.plan.outputs.deployable != 'true'
+        run: echo "::notice::Site plan is not deployable, see the summary. No plan bundle uploaded."
+
+      - name: Remove plan files from the runner
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/site-out"
+
+  # Guardian F1: the attestation token is minted in a separate job from a separate file
+  # (tf-attest.yml, shared with tf-plan.yml), which runs no project code.
+  attest:
+    name: attest
+    needs: plan
+    if: needs.plan.outputs.bundle_sha256 != ''
+    permissions:
+      id-token: write
+    uses: tobipjuk/deploy-workflows/.github/workflows/tf-attest.yml@main
+    with:
+      bundle_sha256: ${{ needs.plan.outputs.bundle_sha256 }}
+      summary_sha256: ${{ needs.plan.outputs.summary_sha256 }}

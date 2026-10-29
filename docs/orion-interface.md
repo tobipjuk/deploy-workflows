@@ -360,3 +360,86 @@ On the Orion side:
 
 Removing a repo: delete the entry, remove the repo from the installation, and (in AWS) set
 `create_deploy_role = false` or delete the deploy role.
+
+## 11. Site plans (`kind: "site"`)
+
+Projects without Terraform (first: lego-mindstorms) use `site-plan.yml` / `site-apply.yml`
+(`docs/site-pipeline.md`). Everything above applies, with these differences.
+
+**Registration.** A site target carries `"kind": "site"` in `deploy-targets.json`:
+
+```json
+{"target": "lego-mindstorms", "repo": "tobipjuk/lego-mindstorms", "kind": "site",
+ "plan_workflow": "plan.yml", "deploy_workflow": "deploy.yml", "installation_id": 12345678}
+```
+
+An entry without `kind` is `terraform`. A plan is only offered when its run shape **and** its
+summary's `kind` match the registration: a site run for a terraform target, or the other way
+round, is refused (log, no message).
+
+**Run shape (section 3) for site targets:**
+- `referenced_workflows` is **exactly** the set {`tobipjuk/deploy-workflows/.github/workflows/site-plan.yml@…`,
+  `…/tf-attest.yml@…`}, both `ref == "refs/heads/main"`, nothing else (for terraform targets:
+  exactly {`tf-plan.yml`, `tf-attest.yml`});
+- exactly two jobs over all attempts, both completed/success: one name ending in ` / site plan`,
+  one ending in ` / attest / attest plan artifacts`;
+- the no-bundle exception is the same (` / site plan` success + skipped ` / attest`, no bundle and
+  no attestation artifact): a plan without changes, a not-deployable plan, or no deploy role.
+- `scripts/check_plan_run.py --kind site` is the reference implementation (`tests/test_run_shapes.py`
+  `SiteRunShapeTest`).
+
+**Attestation (4a):** unchanged. The token comes from the same `tf-attest.yml@main`; it proves the
+bytes, the kind comes from the run shape and the attested summary.
+
+**Summary (section 4):** the same validation, plus `kind == "site"`, and **no buttons** unless
+`deployable == true` **and** `diff_complete == true`. A not-deployable site plan arrives without a
+bundle (info message with `site.not_deployable`, no buttons). Missing `kind` = `terraform`.
+
+**The message (section 5) for site plans:**
+
+```
+DEPLOY APPROVAL: lego-mindstorms (site)
+Commit 1a2b3c4 "Workshop: new robot page"   [untrusted text]
+Plan run 18234567890, 10:42 UTC, expires 12:42 UTC
++3 add  ~2 change  -1 delete
+Destructive: no
+
+NEEDS ATTENTION (2):
+! Gate code (update) cloudfront-function:ev3-workshop-site-pin  +4 -1 lines
+! Service worker (update) s3:sw.js  +1 -1 lines
+
+Changes by prefix: (root) ~2  pages/ +3  img/ -1
+~ s3:index.html
+~ s3:sw.js
++ s3:pages/abc123def0/p001.webp
+... (first 15 paths; the rest in the attachment)
+
+Full diffs: attached (lego-mindstorms-<run id>.txt)
+Digest 3b67c029...2d384e  Bundle 9f3e01aa...
+<run link> <commit link>
+```
+
+- NEEDS ATTENTION comes first, in the summary's order (`attention` is already ordered:
+  invisible/bidi characters, gate, Lambda, `pin.html`, `sw.js`, Cache-Control or Content-Type,
+  new Lambda members, non-text live members, data files without a diff, deletes of root/code
+  keys, LIVE DRIFT, settings mismatch, Lambda env var names unreadable, non-ASCII letters in
+  code, BASELINE ADOPTION). Show every entry: label, action, address, and the non-null of
+  `path`/`before`/`after`. If Telegram's 4,096 characters force a cut, never drop an "Invisible
+  or bidi characters", "Data files without a diff" or "Lambda env var names unreadable" entry;
+  cut from the end of the list instead.
+- Then the per-prefix counts from `site.prefixes`, then the first 15 entries of `changes`
+  (deletes first).
+- **The attachment** (`sendDocument`, plain text, no parse mode; file name and caption built by
+  Orion from the target and run id, never from the summary): the concatenated `site.diffs[].text`
+  in the given order, each preceded by a line `=== <address> <file> (+<added> -<removed>)`,
+  then the full `changes` list (one `<prefix> <address>` line each, prefixes as in section 5),
+  then `site.drift` (`<key>: <what>`). Content only from the attested summary bytes. Diffs show
+  invisible and bidi characters as `<U+XXXX>` already; Orion adds nothing.
+- `Approve DESTROY` when `destructive == true` (more deletes than the policy's `max_deletes`), as
+  for Terraform.
+- **BASELINE ADOPTION** cards (first deploy, `site.adoption == true`) usually carry thousands of
+  deletes and uploads: the attachment is the place to read them.
+
+**Dispatch (7), watching (8):** unchanged; `deploy.yml` calls `site-apply.yml`. A failed site
+apply after some writes reports `summary` "partially applied, see the run (the manifest records
+what was written)" with `status: failed`.
