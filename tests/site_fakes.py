@@ -142,6 +142,9 @@ class FakeAws:
             raise site_aws.NotFound("s3:HeadObject", "404")
         return {"etag": o["etag"], "content_type": o["ct"], "cache_control": o["cc"]}
 
+    def head_objects(self, bucket, keys, progress=None):
+        return {k: self.head_object(bucket, k) for k in keys}
+
     def put_object(self, bucket, key, path, content_type, cache_control, sha256_b64, if_match=None, if_none_match=False):
         self._call("s3:PutObject", bucket, key)
         if bool(if_match) == bool(if_none_match):

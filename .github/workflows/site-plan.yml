@@ -141,8 +141,12 @@ jobs:
       # Reads the commit as data, LIVE with the plan role, LFS through the API (GITHUB_TOKEN,
       # contents: read). Exit 3 = no baseline yet on a push: the run FAILS so it can't
       # supersede the hand-dispatched adoption plan in Orion (round 5 L3).
+      # Its own limit below the job's, so a stuck plan still leaves the summary and the cleanup
+      # step time to run. Adoption of ~9,300 keys (lego-mindstorms) takes a few minutes since the
+      # parallel HEAD / LFS fix; it ran out of the job's 45 minutes before (run 40854404792).
       - name: Site plan
         id: plan
+        timeout-minutes: 30
         working-directory: ${{ runner.temp }}
         env:
           TOOLS: ${{ steps.tools.outputs.dir }}
