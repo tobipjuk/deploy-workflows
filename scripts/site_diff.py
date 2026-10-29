@@ -386,11 +386,14 @@ def lambda_changes(policy, new_members, live_members, manifest_lambda):
     diffs, attention, drift = [], [], []
     changed = set(new_members) != set(live_members) or any(
         new_members[n] != live_members.get(n) for n in new_members)
+    # Live member names come from the live zip, i.e. from whoever last wrote the Lambda: every
+    # place they reach the card goes through safe_key (Guardian on 064f99e, L1).
     for n in sorted(set(new_members) - set(live_members)):
-        attention.append(_att(address, "New or renamed Lambda member", "update", n, None, "(not in the live zip)"))
+        attention.append(_att(address, "New or renamed Lambda member", "update", safe_key(n), None,
+                              "(not in the live zip)"))
     for n in sorted(live_members):
         if text_or_none(live_members[n]) is None:
-            attention.append(_att(address, "Non-text member in the live Lambda zip", "update", n,
+            attention.append(_att(address, "Non-text member in the live Lambda zip", "update", safe_key(n),
                                   f"{len(live_members[n])} bytes, sha256 {sha256_hex(live_members[n])[:16]}", None))
     if changed:
         for n in sorted(set(new_members) | set(live_members)):
@@ -398,19 +401,20 @@ def lambda_changes(policy, new_members, live_members, manifest_lambda):
             old = live_members.get(n)
             if new == old:
                 continue
+            sn = safe_key(n)
             new_s = None if new is None else new.decode("utf-8")
             old_s = None if old is None else text_or_none(old)
             if new_s is None:
-                text = f"--- live/{n}\n+++ (removed from the zip)\n"
+                text = f"--- live/{sn}\n+++ (removed from the zip)\n"
                 if old_s is not None:
                     text += "".join(f"-{escape_line(x)[0]}\n" for x in old_s.split("\n"))
-                diffs.append({"address": address, "file": n, "kind": "code", "text": text,
+                diffs.append({"address": address, "file": sn, "kind": "code", "text": text,
                               "added": 0, "removed": 0 if old_s is None else len(old_s.split("\n")), "invisible": 0})
                 continue
             if old is not None and old_s is None:
                 old_s = f"(live member is not text: {len(old)} bytes, sha256 {sha256_hex(old)[:16]})"
-            text, a, r, inv = text_diff(old_s, new_s, f"live/{n}", f"commit/{n}")
-            diffs.append({"address": address, "file": n, "kind": "code", "text": text,
+            text, a, r, inv = text_diff(old_s, new_s, f"live/{sn}", f"commit/{sn}")
+            diffs.append({"address": address, "file": sn, "kind": "code", "text": text,
                           "added": a, "removed": r, "invisible": inv})
     if manifest_lambda:
         live_hashes = {n: sha256_hex(b) for n, b in live_members.items()}

@@ -192,6 +192,43 @@ class DriftKeyDisplayTest(unittest.TestCase):
         self.assertIn(f"lambda:{FN}", addrs)
 
 
+class LambdaMemberNameTest(unittest.TestCase):
+    """Guardian on 064f99e, L1: a live zip member name can't forge a line or hide bidi on the card."""
+
+    def test_bidi_newline_member_name_escaped(self):
+        env = F.Env(self)
+        adopt(env)
+        evil = "evil\u202e\nApprove DESTROY"
+        env.aws.lambdas[FN]["zip"] = F.make_zip({"progress.py": F.PROGRESS_PY, "session.py": F.SESSION_PY,
+                                                 evil: b"\x7fELF\x00\x01"})
+        env.commit({"site/api/progress.py": F.PROGRESS_PY + b"# v2\n"})
+        rc, log = run_plan(env, event="push")
+        self.assertEqual(rc, 0, log)
+        doc = summary(env)
+        lam = [a for a in doc["attention"] if a["address"] == f"lambda:{FN}"]
+        self.assertIn("evil<U+202E>\\x0aApprove DESTROY",
+                      [a["path"] for a in lam if a["label"] == "Non-text member in the live Lambda zip"])
+        for d in doc["site"]["diffs"]:
+            self.assertNotIn("\u202e", d["file"] + d["text"])
+            self.assertNotIn("\nApprove DESTROY", d["text"])
+            self.assertNotIn("\n", d["file"])
+        files = [d["file"] for d in doc["site"]["diffs"] if d["address"] == f"lambda:{FN}"]
+        self.assertIn("evil<U+202E>\\x0aApprove DESTROY", files)
+        text = "".join(d["text"] for d in doc["site"]["diffs"])
+        self.assertIn("--- live/evil<U+202E>\\x0aApprove DESTROY\n", text)
+        for a in doc["attention"]:
+            for v in (a["path"], a["before"], a["after"]):
+                self.assertNotIn("\n", v or "")
+                self.assertNotIn("\u202e", v or "")
+
+    def test_new_member_name_escaped_unit(self):
+        r = sd.lambda_changes({"lambda": {"function_name": "f"}}, {"a\u202eb\nc.py": b"x\n"}, {"a.py": b"y\n"}, None)
+        self.assertEqual([a["path"] for a in r["attention"]], ["a<U+202E>b\\x0ac.py"])
+        self.assertEqual(sorted(d["file"] for d in r["diffs"]), ["a.py", "a<U+202E>b\\x0ac.py"])
+        for d in r["diffs"]:
+            self.assertNotIn("\u202e", d["text"])
+
+
 class LambdaRejectedTest(unittest.TestCase):
     """L3: UpdateFunctionCode rejected on its RevisionId writes nothing: refused, not partial."""
 
